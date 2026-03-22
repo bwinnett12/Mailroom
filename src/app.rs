@@ -52,6 +52,7 @@ impl Hooks for App {
             .add_route(controllers::auth::routes())
     }
     async fn connect_workers(ctx: &AppContext, queue: &Queue) -> Result<()> {
+        queue.register(crate::workers::note_tagger::Worker::build(ctx)).await?;
         queue.register(DownloadWorker::build(ctx)).await?;
         Ok(())
     }

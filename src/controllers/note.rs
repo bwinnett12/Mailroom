@@ -5,6 +5,7 @@ use loco_rs::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::models::_entities::notes::{ActiveModel, Entity, Model};
+use crate::workers::note_tagger;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Params {
@@ -33,11 +34,24 @@ pub async fn list(State(ctx): State<AppContext>) -> Result<Response> {
 
 #[debug_handler]
 pub async fn add(State(ctx): State<AppContext>, Json(params): Json<Params>) -> Result<Response> {
+    // 1. Create a blank "ActiveModel" (the database worker)
     let mut item = ActiveModel {
         ..Default::default()
     };
+
+    // 2. Fill that blank model with the data from your 'curl' (params)
     params.update(&mut item);
+
+    // 3. Save it to SQLite. This returns the final saved 'item' (with its new ID)
     let item = item.insert(&ctx.db).await?;
+
+    // 4. NOW trigger the AI worker using the ID we just got
+    // This runs in the background while the user gets their response
+    note_tagger::Worker::perform_later(&ctx, note_tagger::NoteTaggerArgs {
+        note_id: item.id, 
+    }).await?;
+
+    // 5. Tell the user "Success!"
     format::json(item)
 }
 
