@@ -1,0 +1,13 @@
+# Rust
+/target
+Cargo.lock
+
+# Nix
+.direnv/
+result
+
+# Loco / Databases
+config/local.yaml
+*.db
+*.db-journal
+.env
