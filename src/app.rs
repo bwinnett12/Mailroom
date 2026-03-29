@@ -53,11 +53,18 @@ impl Hooks for App {
         Ok(vec![])
     }
 
-/// This is where we inject MongoDB into the AppContext
-  async fn after_context(ctx: AppContext) -> Result<AppContext> {
+    /// This is where we inject MongoDB into the AppContext
+    async fn after_context(ctx: AppContext) -> Result<AppContext> {
         // We'll leave the connection logic for a custom Initializer shortly,
         // for now, let's just make the code compile.
         Ok(ctx)
+    }
+
+    fn routes(_ctx: &AppContext) -> AppRoutes {
+        AppRoutes::with_default_routes()
+            .add_route(controllers::movie::routes())
+            .add_route(controllers::note::routes())
+            .add_route(controllers::auth::routes())
     }
 
 
