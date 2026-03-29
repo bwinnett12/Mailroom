@@ -38,7 +38,7 @@ impl DecimalService {
             parent_code,
             external_context: std::collections::HashMap::new(),
             vector_id: None,
-            tags: None,
+            tags: tags: vec![],
             created_at: Utc::now(),
             updated_at: Utc::now(),
         })
