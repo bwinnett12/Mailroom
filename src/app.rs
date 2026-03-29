@@ -54,43 +54,10 @@ impl Hooks for App {
     }
 
 /// This is where we inject MongoDB into the AppContext
-    async fn after_context(ctx: AppContext) -> Result<AppContext> {
-        // Pulling from your config/development.yaml 'initializers' section
-        let mongo_config = ctx.config.initializers
-            .as_ref()
-            .and_then(|i| i.get("mongodb"))
-            .ok_or_else(|| loco_rs::Error::Message("mongodb config not found in yaml".into()))?;
-
-        let uri = mongo_config.get("uri")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| loco_rs::Error::Message("mongodb uri missing".into()))?;
-
-        let db_name = mongo_config.get("database")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| loco_rs::Error::Message("mongodb database name missing".into()))?;
-
-        // Connect to Mongo
-        let client = Client::with_uri_str(uri).await.map_err(|e| {
-            loco_rs::Error::Message(format!("failed to connect to mongodb: {e}"))
-        })?;
-        
-        let db = client.database(db_name);
-
-        // Inject the Database client into the 'extra' state of AppContext
-        // Note: Since 'extra' stores Any, we can put the Database handle there.
-        let mut ctx = ctx;
-        ctx.extra.insert("mongodb".to_string(), serde_json::to_value(uri).unwrap()); 
-        // Tip: For complex types, many users wrap them in an Arc/State struct.
-        
+  async fn after_context(ctx: AppContext) -> Result<AppContext> {
+        // We'll leave the connection logic for a custom Initializer shortly,
+        // for now, let's just make the code compile.
         Ok(ctx)
-    }
-
-    fn routes(_ctx: &AppContext) -> AppRoutes {
-        AppRoutes::with_default_routes()
-            .add_route(controllers::movie::routes())
-            .add_route(controllers::note::routes())
-            .add_route(controllers::auth::routes())
-            // You'll add your decimal_record routes here soon
     }
 
 

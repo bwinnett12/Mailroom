@@ -33,7 +33,7 @@ pub struct DecimalRecord {
 
     /// Extensible metadata for "Real World" or "System" links
     /// e.g., {"location": "Physical Filing Cabinet", "script_path": "/bin/sync"}
-    pub external_links: HashMap<String, String>,
+    pub external_context: HashMap<String, String>,
 
     /// Timestamps for scheduling and tracking
     pub created_at: chrono::DateTime<chrono::Utc>,

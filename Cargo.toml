@@ -37,6 +37,7 @@ uuid = { version = "1.6", features = ["v4"] }
 include_dir = { version = "0.7" }
 reqwest = { version = "0.12", features = ["json"] }
 mongodb = "3.2.5"
+anyhow = "1.0.102"
 
 [[bin]]
 name = "mailroom-cli"
