@@ -6,13 +6,13 @@ use chrono::Utc;
 pub struct DecimalService;
 
 impl DecimalService {
-    /// Parses a string like "13.4-A-SOIL" into a JohnnyRecord
-    pub fn parse_code(input: &str, content: &str, title: &str) -> Result<JohnnyRecord> {
+    /// Parses a string like "13.4-A-SOIL" into a DecimalRecord
+    pub fn parse_code(input: &str, content: &str, title: &str) -> Result<DecimalRecord> {
         let parts: Vec<&str> = input.split(|c| c == '.' || c == '-').collect();
         
         // Basic validation: Must at least have a top-level category (e.g., "13")
         if parts.is_empty() {
-            return Err(anyhow!("Invalid Johnny.Decimal format"));
+            return Err(anyhow!("Invalid Johnny.Decimal format for DecimalRecord"));
         }
 
         // Calculate depth based on number of separators

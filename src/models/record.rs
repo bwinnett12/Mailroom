@@ -42,7 +42,7 @@ pub struct DecimalRecord {
 
 
 
-impl JohnnyRecord {
+impl DecimalRecord {
     /// Helper to determine if this record is a "Leaf" (a specific process)
     /// vs a "Branch" (a folder/category)
     pub fn is_process(&self) -> bool {
