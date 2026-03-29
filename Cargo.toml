@@ -36,6 +36,7 @@ validator = { version = "0.20" }
 uuid = { version = "1.6", features = ["v4"] }
 include_dir = { version = "0.7" }
 reqwest = { version = "0.12", features = ["json"] }
+mongodb = "3.2.5"
 
 [[bin]]
 name = "mailroom-cli"
