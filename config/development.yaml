@@ -89,3 +89,7 @@ auth:
     secret: JnJoPeevcBRrsRoEL3of
     # Token expiration time in seconds
     expiration: 604800 # 7 days
+
+queue:
+  kind: Sqlite
+  uri: "sqlite://mailroom_queue.sqlite?mode=rwc" # This is the missing field
