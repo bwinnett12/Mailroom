@@ -93,3 +93,10 @@ auth:
 queue:
   kind: Sqlite
   uri: "sqlite://mailroom_queue.sqlite?mode=rwc" # This is the missing field
+
+
+
+# config/development.yaml
+mongodb:
+  uri: "mongodb://localhost:27017"
+  database: "mailroom_db"
