@@ -3,6 +3,8 @@ use loco_rs::prelude::*;
 use loco_rs::boot::{create_app, BootResult, StartMode};
 use loco_rs::environment::Environment;
 use loco_rs::controller::middleware::Middleware;
+use loco_rs::controller::middleware::cors;
+use loco_rs::controller::Routes;
 
 use crate::{
     controllers, initializers, models, tasks, workers,
@@ -18,7 +20,7 @@ impl Hooks for App {
     fn routes(_ctx: &AppContext) -> AppRoutes {
         AppRoutes::with_default_api()
             .add_route(controllers::auth::routes())
-            .add_route(controllers::notes::routes())
+            //.add_route(controllers::notes::routes())
     }
 
     async fn boot(mode: StartMode, environment: &Environment) -> Result<BootResult> {
