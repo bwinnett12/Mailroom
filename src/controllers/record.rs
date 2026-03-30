@@ -27,8 +27,8 @@ pub async fn create(
 
 	crate::services::decimal_record::DecimalService::save(&db, record)
         .await
-        .map_err(|e| format_err!(InternalServerError, e.to_string()))?;
-
+		.map_err(|e| format_err!(InternalServerError, e.to_string()))?;
+	
     format::json("Record created successfully")
 
     format::json(record)
