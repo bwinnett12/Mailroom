@@ -2,7 +2,7 @@
 use loco_rs::prelude::*;
 use serde::{Deserialize, Serialize};
 use crate::services::decimal_record::DecimalService;
-use mongodb::Database;
+// use mongodb::Database;
 // use ax_extract::Extension;
 use axum::Extension;
 
@@ -18,16 +18,17 @@ pub async fn create(
     Extension(db): Extension<Database>,
     Json(params): Json<RecordRequest>,
 ) -> Result<Response> {
-    // 1. Parse
-let record = DecimalService::parse_code(&params.code, &params.content, &params.title)
-        .map_err(Box::from)?; // Box<dyn Error> is automatically converted to loco_rs::Error
+    // 1. Logic: Parse the input
+    // We convert the anyhow error into a simple string message for the framework
+    let record = DecimalService::parse_code(&params.code, &params.content, &params.title)
+        .map_err(|e| Error::Message(e.to_string()))?; 
 
-    // 2. Save
+    // 2. Database: Save to Mongo
     DecimalService::save(&db, record.clone())
         .await
-        .map_err(|e| Error::InternalServerError(e.to_string()))?; 
+        .map_err(|e| Error::Message(e.to_string()))?; 
 
-    // 3. Return JSON
+    // 3. Return JSON (No semicolon)
     format::json(record)
 }
 
