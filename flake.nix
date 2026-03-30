@@ -24,6 +24,8 @@
           pkg-config
           openssl
           libiconv
+          trunk
+          wasm-pack
           
           # Optional: useful for Loco DB interactions
           sea-orm-cli 

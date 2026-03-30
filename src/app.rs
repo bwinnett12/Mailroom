@@ -14,6 +14,7 @@ use mongodb::{Client, Database};
 use migration::Migrator;
 use std::path::Path;
 use crate::initializers::mongodb::MongoInitializer;
+use crate::components::record_list::RecordList;
 
 #[allow(unused_imports)]
 use crate::{
@@ -90,6 +91,8 @@ impl Hooks for App {
             .add_route(controllers::record::routes())
     }
 
+    
+
 
     async fn connect_workers(ctx: &AppContext, queue: &Queue) -> Result<()> {
         queue.register(crate::workers::note_tagger::Worker::build(ctx)).await?;
@@ -109,5 +112,44 @@ impl Hooks for App {
         db::seed::<users::ActiveModel>(&ctx.db, &base.join("users.yaml").display().to_string())
             .await?;
         Ok(())
+    }
+
+    fn middleware(_ctx: &AppContext) -> Result<Vec<Box<dyn Middleware>>> {
+        Ok(vec![
+            // This allows your frontend (wherever it lives) to talk to the API
+            Box::new(CorsLayer::permissive()),
+        ])
+    }
+
+    // This function lives in your Leptos frontend
+    async fn fetch_records() -> Vec<DecimalRecord> {
+        let res = reqwest::get("http://10.0.1.10:5150/api/records")
+            .await
+            .expect("Failed to fetch")
+            .json::<Vec<DecimalRecord>>()
+            .await
+            .expect("Failed to parse JSON");
+        res
+    }
+}
+
+
+
+#[component]
+pub fn App() -> impl IntoView {
+    view! {
+        <Router>
+            <main class="bg-slate-50 min-h-screen">
+                <Routes>
+                    // When the user hits the root URL, show the list
+                    <Route path="" view=move || view! { 
+                        <div class="container mx-auto py-8">
+                            <h1 class="text-3xl font-bold mb-6">"Mailroom Dashboard"</h1>
+                            <RecordList /> // <--- It goes here!
+                        </div>
+                    }/>
+                </Routes>
+            </main>
+        </Router>
     }
 }
