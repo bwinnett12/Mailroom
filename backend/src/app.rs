@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use loco_rs::prelude::*;
-use loco_rs::boot::{create_app, BootResult};
+use loco_rs::boot::{create_app, BootResult, StartMode};
 use loco_rs::environment::Environment;
+use loco_rs::controller::middleware::Middleware;
 
 use crate::{
     controllers, initializers, models, tasks, workers,
@@ -26,7 +27,7 @@ impl Hooks for App {
 
     fn middlewares(_ctx: &AppContext) -> Result<Vec<Box<dyn Middleware>>> {
         Ok(vec![
-            Box::new(axum::middleware::from_fn(loco_rs::boot::middleware::cors)),
+            Box::new(axum::middleware::from_fn(loco_rs::controller::middleware::cors)),
         ])
     }
 }
