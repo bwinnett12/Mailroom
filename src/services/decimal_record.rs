@@ -47,7 +47,7 @@ impl DecimalService {
         })
     }
 
-pub async fn ssave(db: &mongodb::Database, record: DecimalRecord) -> Result<()> {
+pub async fn save(db: &mongodb::Database, record: DecimalRecord) -> Result<()> {
         // 1. Get the MongoDB client from AppContext
         // We'll use a helper to get the DB handle we set up in app.rs
     //    let db = ctx.extra.get("mongodb_handle")
@@ -58,7 +58,7 @@ pub async fn ssave(db: &mongodb::Database, record: DecimalRecord) -> Result<()> 
 
         // 2. Insert the record
         collection
-            .insert_one(record, None)
+            .insert_one(record)
             .await
             .map_err(|e| anyhow!("Failed to insert into MongoDB: {}", e))?;
 
