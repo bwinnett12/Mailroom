@@ -13,25 +13,21 @@ pub struct RecordRequest {
     pub content: String,
 }
 
-/// Handler to create a new Johnny.Decimal record
 pub async fn create(
-    State(_ctx): State<AppContext>, // We still need the base context
-	Extension(db): Extension<Database>,
+    State(_ctx): State<AppContext>,
+    Extension(db): Extension<Database>,
     Json(params): Json<RecordRequest>,
 ) -> Result<Response> {
-    // 1. Logic: Parse the input using your verified service
+    // 1. Parse
     let record = DecimalService::parse_code(&params.code, &params.content, &params.title)
-        .map_err(|e| bad_request(e.to_string()))?;
+        .map_err(|e| Error::BadRequest(e.to_string()))?; // Direct enum variant access
 
-    // 2. Database: Since we can't use AppContext.extra, we'll initialize 
-    // the connection here (or pull from a global state if we set that up next)
-
-	crate::services::decimal_record::DecimalService::save(&db, record)
+    // 2. Save
+    DecimalService::save(&db, record.clone())
         .await
-		.map_err(|e| internal_server_error(e.to_string()))?;
+        .map_err(|e| Error::InternalServerError(e.to_string()))?; // Direct enum variant access
 
-    //format::json("Record created successfully");
-
+    // 3. Return
     format::json(record)
 }
 
