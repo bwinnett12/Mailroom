@@ -58,7 +58,7 @@ impl DecimalService {
 
         // 2. Insert the record
         collection
-            .insert_one(record, None)
+            .insert_one(record)
             .await
             .map_err(|e| anyhow!("Failed to insert into MongoDB: {}", e))?;
 
