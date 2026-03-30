@@ -21,16 +21,16 @@ pub async fn create(
 ) -> Result<Response> {
     // 1. Logic: Parse the input using your verified service
     let record = DecimalService::parse_code(&params.code, &params.content, &params.title)
-        .map_err(|e| bad_request!(e.to_string()))?;
+        .map_err(|e| bad_request(e.to_string()))?;
 
     // 2. Database: Since we can't use AppContext.extra, we'll initialize 
     // the connection here (or pull from a global state if we set that up next)
 
 	crate::services::decimal_record::DecimalService::save(&db, record)
         .await
-		.map_err(|e| internal_server_error!(e.to_string()))?;
+		.map_err(|e| internal_server_error(e.to_string()))?;
 
-    format::json("Record created successfully");
+    //format::json("Record created successfully");
 
     format::json(record)
 }
