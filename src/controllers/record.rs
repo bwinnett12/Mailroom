@@ -18,16 +18,16 @@ pub async fn create(
     Extension(db): Extension<Database>,
     Json(params): Json<RecordRequest>,
 ) -> Result<Response> {
-    // 1. Logic: Parse the input
-    let record = DecimalService::parse_code(&params.code, &params.content, &params.title)
-        .map_err(|e| Error::msg(e.to_string()))?; 
+    // 1. Parse
+let record = DecimalService::parse_code(&params.code, &params.content, &params.title)
+        .map_err(Box::from)?; // Box<dyn Error> is automatically converted to loco_rs::Error
 
-    // 2. Database: Save to Mongo
+    // 2. Save
     DecimalService::save(&db, record.clone())
         .await
-        .map_err(|e| Error::msg(e.to_string()))?; 
+        .map_err(|e| Error::InternalServerError(e.to_string()))?; 
 
-    // 3. Return JSON (No semicolon)
+    // 3. Return JSON
     format::json(record)
 }
 
