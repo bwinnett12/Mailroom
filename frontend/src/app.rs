@@ -3,7 +3,9 @@ use crate::components::record_list::RecordList;
 
 #[component]
 pub fn App() -> impl IntoView {
-    view! {
+    // Explicitly returning the view helps the Rust compiler 
+    // infer that this is a Leptos Element.
+    let view = view! {
         <div class="app-container">
             <main class="p-6 bg-slate-950 min-h-screen text-slate-200">
                 <div class="max-w-4xl mx-auto">
@@ -14,5 +16,6 @@ pub fn App() -> impl IntoView {
                 </div>
             </main>
         </div>
-    }
+    };
+    view
 }
