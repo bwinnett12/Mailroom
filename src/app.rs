@@ -13,7 +13,6 @@ use loco_rs::{
 use mongodb::{Client, Database};
 use migration::Migrator;
 use std::path::Path;
-
 use crate::initializers::mongodb::MongoInitializer;
 
 #[allow(unused_imports)]

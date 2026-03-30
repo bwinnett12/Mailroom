@@ -33,7 +33,6 @@ workers:
   #   - BackgroundAsync - Workers operate asynchronously in the background, processing tasks with async capabilities.
   mode: BackgroundAsync
 
-  
 
 # Mailer Configuration.
 mailer:
@@ -54,7 +53,10 @@ mailer:
     # hello_name:
 
 # Initializers Configuration
-# initializers:
+initializers:
+  mongodb:
+    uri: "mongodb://localhost:27017"
+    database: "mailroom_db"
 #  oauth2:
 #    authorization_code: # Authorization code grant type
 #      - client_identifier: google # Identifier for the OAuth2 provider. Replace 'google' with your provider's name if different, must be unique within the oauth2 config.
@@ -92,11 +94,4 @@ auth:
 
 queue:
   kind: Sqlite
-  uri: "sqlite://mailroom_queue.sqlite?mode=rwc" # This is the missing field
-
-
-
-# config/development.yaml
-mongodb:
-  uri: "mongodb://localhost:27017"
-  database: "mailroom_db"
+  uri: "sqlite://mailroom_queue.sqlite?mode=rwc"
