@@ -3,7 +3,7 @@ use loco_rs::prelude::*;
 use serde::{Deserialize, Serialize};
 use crate::services::decimal_record::DecimalService;
 use mongodb::Database;
-use ax_extract::Extension;
+// use ax_extract::Extension;
 use axum::Extension;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -28,10 +28,10 @@ pub async fn create(
 	crate::services::decimal_record::DecimalService::save(&db, record)
         .await
 		.map_err(|e| format_err!(InternalServerError, e.to_string()))?;
-	
-    format::json("Record created successfully")
 
-    format::json(record)
+    format::json("Record created successfully");
+
+    format::json(record);
 }
 
 pub fn routes() -> Routes {
