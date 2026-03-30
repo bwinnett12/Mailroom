@@ -11,3 +11,7 @@ reqwest = { version = "0.11", features = ["json"] }
 common = { path = "../common" }
 serde = { workspace = true }
 chrono = { workspace = true }
+
+[[bin]]
+name = "frontend"
+path = "src/main.rs"
