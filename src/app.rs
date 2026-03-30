@@ -14,6 +14,8 @@ use mongodb::{Client, Database};
 use migration::Migrator;
 use std::path::Path;
 
+use crate::initializers::mongodb::MongoInitializer;
+
 #[allow(unused_imports)]
 use crate::{
     controllers, 
@@ -50,7 +52,9 @@ impl Hooks for App {
     }
 
     async fn initializers(_ctx: &AppContext) -> Result<Vec<Box<dyn Initializer>>> {
-        Ok(vec![])
+        Ok(vec![
+            Box::new(MongoInitializer),
+        ])
     }
 
     async fn after_context(ctx: AppContext) -> Result<AppContext> {
@@ -84,6 +88,7 @@ impl Hooks for App {
             .add_route(controllers::movie::routes())
             .add_route(controllers::note::routes())
             .add_route(controllers::auth::routes())
+            .add_route(controllers::record::routes())
     }
 
 
