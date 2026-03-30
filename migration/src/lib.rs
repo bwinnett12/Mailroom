@@ -6,6 +6,8 @@ mod m20220101_000001_users;
 mod m20260322_034226_notes;
 mod m20260322_040149_movies;
 mod m20260322_045959_add_tags_to_notes;
+mod m20260322_071040_entries;
+mod m20260322_071309_add_owner_to_notes;
 pub struct Migrator;
 
 #[async_trait::async_trait]
@@ -16,6 +18,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260322_034226_notes::Migration),
             Box::new(m20260322_040149_movies::Migration),
             Box::new(m20260322_045959_add_tags_to_notes::Migration),
+            Box::new(m20260322_071040_entries::Migration),
+            Box::new(m20260322_071309_add_owner_to_notes::Migration),
             // inject-above (do not remove this comment)
         ]
     }

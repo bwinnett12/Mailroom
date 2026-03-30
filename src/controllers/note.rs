@@ -12,6 +12,7 @@ pub struct Params {
     pub title: String,
     pub content: Option<String>,
     pub is_research: Option<bool>,
+    // pub user_id: i32,
     }
 
 impl Params {
@@ -19,6 +20,7 @@ impl Params {
       item.title = Set(self.title.clone());
       item.content = Set(self.content.clone());
       item.is_research = Set(self.is_research);
+      // item.user_id = Set(self.user_id);
       }
 }
 
@@ -41,6 +43,13 @@ pub async fn add(State(ctx): State<AppContext>, Json(params): Json<Params>) -> R
 
     // 2. Fill that blank model with the data from your 'curl' (params)
     params.update(&mut item);
+    /*
+    if params.is_research.unwrap_or(false) {
+        if let Ok(Some(latest_journal)) = Entity::find_latest_journal(&ctx.db, params.user_id).await {
+            item.parent_id = Set(Some(latest_journal.id));
+        }
+    }
+    */
 
     // 3. Save it to SQLite. This returns the final saved 'item' (with its new ID)
     let item = item.insert(&ctx.db).await?;

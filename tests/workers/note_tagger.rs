@@ -1,8 +1,5 @@
 use loco_rs::{bgworker::BackgroundWorker, testing::prelude::*};
-use mailroom::{
-    app::App,
-    workers::note_tagger::{Worker, WorkerArgs},
-};
+use mailroom::workers::note_tagger::Worker;
 use serial_test::serial;
 
 #[tokio::test]

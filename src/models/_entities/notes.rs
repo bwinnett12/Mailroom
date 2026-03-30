@@ -15,7 +15,10 @@ pub struct Model {
     pub content: Option<String>,
     pub is_research: Option<bool>,
     pub tags: Option<String>,
+    pub user_id: i32,           // <--- Add this manually
+    pub parent_id: Option<i32>, // <--- Add this manually
 }
+
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}
