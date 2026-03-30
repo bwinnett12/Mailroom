@@ -4,8 +4,8 @@ use loco_rs::{
     app::{AppContext, Initializer},
     Result,
 };
-use mongodb::{Client, Database};
-use axum::{extract::FromRef, Extension};
+use mongodb::Client;
+use axum::Extension;
 
 pub struct MongoInitializer;
 

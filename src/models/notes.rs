@@ -3,11 +3,11 @@ pub use super::_entities::notes::Entity;
 pub use super::_entities::notes::Model;
 use loco_rs::prelude::*;
 use sea_orm::prelude::*;
-use sea_orm::QueryOrder; 
+ 
 
 impl Entity {
     // Helper to find the most recent journal entry for a user
-    pub async fn find_latest_journal(db: &DatabaseConnection, user_id: i32) -> Result<Option<Model>> {
+    pub async fn find_latest_journal(_db: &DatabaseConnection, _user_id: i32) -> Result<Option<Model>> {
         /*let journal = Entity::find()
             .filter(crate::models::_entities::notes::Column::UserId.eq(user_id))
             .filter(crate::models::_entities::notes::Column::Title.contains("Journal")) // Or a specific 'kind' column if you added one
