@@ -1,8 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
-    "common",
     "backend",
+    "common",
     "frontend",
 ]
 
