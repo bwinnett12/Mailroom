@@ -5,6 +5,8 @@ use loco_rs::environment::Environment;
 use loco_rs::controller::middleware::Middleware;
 use loco_rs::controller::middleware::cors;
 use loco_rs::controller::Routes;
+use loco_rs::app::Hooks;
+
 
 use crate::{
     controllers, initializers, models, tasks, workers,
@@ -17,8 +19,8 @@ impl Hooks for App {
         "mailroom"
     }
 
-    fn routes(_ctx: &AppContext) -> AppRoutes {
-        AppRoutes::with_default_api()
+    fn routes(_ctx: &AppContext) -> Routes {
+        Routes::with_default_api()
             .add_route(controllers::auth::routes())
             //.add_route(controllers::notes::routes())
     }
@@ -27,9 +29,7 @@ impl Hooks for App {
         create_app::<Self>(mode, environment).await
     }
 
-    fn middlewares(_ctx: &AppContext) -> Result<Vec<Box<dyn Middleware>>> {
-        Ok(vec![
-            Box::new(axum::middleware::from_fn(loco_rs::controller::middleware::cors)),
-        ])
+fn middlewares(_ctx: &AppContext) -> Result<Vec<Box<dyn Middleware>>> {
+        Ok(vec![])
     }
 }
