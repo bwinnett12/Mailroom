@@ -43,6 +43,25 @@ impl DecimalService {
             updated_at: Utc::now(),
         })
     }
+
+    pub async fn save(ctx: &AppContext, record: DecimalRecord) -> Result<()> {
+        // 1. Get the MongoDB client from AppContext
+        // We'll use a helper to get the DB handle we set up in app.rs
+        let db = ctx.extra.get("mongodb_handle")
+            .and_then(|v| v.downcast_ref::<Database>())
+            .ok_or_else(|| anyhow!("MongoDB handle not found in AppContext"))?;
+
+        let collection = db.collection::<DecimalRecord>("records");
+
+        // 2. Insert the record
+        collection
+            .insert_one(record, None)
+            .await
+            .map_err(|e| anyhow!("Failed to insert into MongoDB: {}", e))?;
+
+        Ok(())
+    }
+
 }
 
 

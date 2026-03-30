@@ -57,6 +57,13 @@ impl Hooks for App {
     async fn after_context(ctx: AppContext) -> Result<AppContext> {
         // We'll leave the connection logic for a custom Initializer shortly,
         // for now, let's just make the code compile.
+        let client = Client::with_uri_str(uri).await?;
+        let db = client.database(db_name);
+
+        let mut ctx = ctx;
+        // Store the actual Database handle, not just the URI string
+        ctx.extra.insert("mongodb_handle".to_string(), Box::new(db));
+        
         Ok(ctx)
     }
 
