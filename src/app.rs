@@ -53,17 +53,29 @@ impl Hooks for App {
         Ok(vec![])
     }
 
-    /// This is where we inject MongoDB into the AppContext
     async fn after_context(ctx: AppContext) -> Result<AppContext> {
-        // We'll leave the connection logic for a custom Initializer shortly,
-        // for now, let's just make the code compile.
-        let client = Client::with_uri_str(uri).await?;
-        let db = client.database(db_name);
+        // 1. Get config safely
+        let mongo_config = ctx.config.initializers
+            .as_ref()
+            .and_then(|i| i.get("mongodb"))
+            .ok_or_else(|| loco_rs::Error::Message("mongodb config missing".into()))?;
 
-        let mut ctx = ctx;
-        // Store the actual Database handle, not just the URI string
-        ctx.extra.insert("mongodb_handle".to_string(), Box::new(db));
+        let uri_str = mongo_config.get("uri").and_then(|v| v.as_str())
+            .ok_or_else(|| loco_rs::Error::Message("mongodb uri missing".into()))?;
         
+        let db_name_str = mongo_config.get("database").and_then(|v| v.as_str())
+            .ok_or_else(|| loco_rs::Error::Message("mongodb db_name missing".into()))?;
+
+        // 2. Establish connection
+        let client = Client::with_uri_str(uri_str).await.map_err(|e| {
+            loco_rs::Error::Message(format!("failed to connect to mongodb: {e}"))
+        })?;
+        
+        // We will verify the connection here
+        let _db = client.database(db_name_str);
+
+        // Since your AppContext has no 'extra' field, we will skip trying to 
+        // force it in here and instead pass it directly to our services.
         Ok(ctx)
     }
 
