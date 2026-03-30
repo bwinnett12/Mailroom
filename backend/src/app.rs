@@ -4,8 +4,9 @@ use loco_rs::boot::{create_app, BootResult, StartMode};
 use loco_rs::environment::Environment;
 use loco_rs::controller::middleware::Middleware;
 use loco_rs::controller::middleware::cors;
-use loco_rs::controller::Routes;
+use loco_rs::controller::AppRoutes;
 use loco_rs::app::Hooks;
+use loco_rs::config::Config;
 
 
 use crate::{
@@ -19,14 +20,18 @@ impl Hooks for App {
         "mailroom"
     }
 
-    fn routes(_ctx: &AppContext) -> Routes {
-        Routes::with_default_api()
+    fn routes(_ctx: &AppContext) -> AppRoutes {
+        AppRoutes::with_default_api()
             .add_route(controllers::auth::routes())
             //.add_route(controllers::notes::routes())
     }
 
-    async fn boot(mode: StartMode, environment: &Environment) -> Result<BootResult> {
-        create_app::<Self>(mode, environment).await
+    async fn boot(
+        mode: StartMode, 
+        environment: &Environment,
+        config: Config
+    ) -> Result<BootResult> {
+        create_app::<Self>(mode, environment, config).await
     }
 
 fn middlewares(_ctx: &AppContext) -> Result<Vec<Box<dyn Middleware>>> {
