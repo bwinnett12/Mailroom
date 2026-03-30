@@ -2,7 +2,7 @@
 use loco_rs::prelude::*;
 use serde::{Deserialize, Serialize};
 use crate::services::decimal_record::DecimalService;
-// use mongodb::Database;
+use mongodb::Database;
 // use ax_extract::Extension;
 use axum::Extension;
 
