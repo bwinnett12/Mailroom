@@ -8,6 +8,8 @@ use loco_rs::controller::AppRoutes;
 use loco_rs::app::Hooks;
 use loco_rs::config::Config;
 
+pub use axum::middleware::from_fn;
+
 
 use crate::{
     controllers, initializers, models, tasks, workers,
