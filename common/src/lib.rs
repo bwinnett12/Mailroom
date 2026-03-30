@@ -10,3 +10,4 @@ pub struct DecimalRecord {
     pub parent_code: Option<String>,
     pub created_at: DateTime<Utc>,
 }
+
