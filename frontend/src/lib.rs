@@ -2,6 +2,7 @@ use leptos::*;
 use leptos_router::*;
 pub use common::DecimalRecord;
 pub mod app;
+pub mod components;
 
 #[component]
 pub fn App() -> impl IntoView {
