@@ -39,8 +39,7 @@ impl Hooks for App {
         create_app::<Self>(mode, environment, config).await
     }
 
-    // Explicitly use the trait here
-    fn middlewares(_ctx: &AppContext) -> Result<Vec<Box<dyn Middleware>>> {
+    fn middlewares(_ctx: &AppContext) -> Result<Vec<Box<dyn loco_rs::controller::middleware::Middleware>>> {
         Ok(vec![])
     }
 }
