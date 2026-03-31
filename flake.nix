@@ -39,7 +39,7 @@
         '';
       };
 
-      rust-bin.stable.latest.default.override {
+      rust-bin.stable.latest.default.override = {
         targets = [ "wasm32-unknown-unknown" ];
       }
     };
