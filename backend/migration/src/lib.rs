@@ -8,7 +8,7 @@ mod m20260322_040149_movies;
 mod m20260322_045959_add_tags_to_notes;
 mod m20260322_071040_entries;
 mod m20260322_071309_add_owner_to_notes;
-mod m20260331_xxxxxx_add_johnny_ledger;
+mod m20260331_0434_add_johnny_ledger;
 
 pub struct Migrator;
 
