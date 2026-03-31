@@ -38,5 +38,9 @@
           echo "Rust version: $(rustc --version)"
         '';
       };
+
+      rust-bin.stable.latest.default.override {
+        targets = [ "wasm32-unknown-unknown" ];
+      }
     };
 }
