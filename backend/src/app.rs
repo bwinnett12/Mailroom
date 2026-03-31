@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use loco_rs::prelude::*;
 use loco_rs::boot::{create_app, BootResult, StartMode};
 use loco_rs::environment::Environment;
-use loco_rs::controller::middleware::Middleware;
+// use loco_rs::controller::middleware::Middleware;
 
 use loco_rs::controller::middleware::cors;
 

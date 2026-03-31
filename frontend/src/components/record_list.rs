@@ -1,3 +1,5 @@
+use leptos::*;
+
 #[component]
 pub fn RecordList() -> impl IntoView {
     // 1. Define the resource
