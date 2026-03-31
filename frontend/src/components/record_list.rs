@@ -1,32 +1,27 @@
 use leptos::*;
 
+// 1. Define the fetching function (Stub for now)
+async fn fetch_records() -> Vec<String> {
+    vec!["Johnny.Decimal 10-19".to_string(), "Johnny.Decimal 20-29".to_string()]
+}
+
 #[component]
 pub fn RecordList() -> impl IntoView {
-    // 1. Define the resource
-    // The first argument is the "source" (usually a signal like a search bar). 
-    // If it's (), it just runs once on load.
+    // 2. Explicitly type the resource so the view knows what 'data' is
     let records = create_resource(|| (), |_| async move { fetch_records().await });
 
     view! {
-        <div class="p-4">
-            <h1 class="text-xl font-bold">"Johnny.Decimal Index"</h1>
-            
-            // 2. Use a Transition or Suspense component to handle the loading state
-            <Transition fallback=move || view! { <p>"Loading your brain..."</p> }>
+        <div class="space-y-4">
+            <Transition fallback=move || view! { <p>"Loading Island data..."</p> }>
                 {move || {
-                    records.get().map(|data| {
-                        view! {
-                            <ul class="space-y-2 mt-4">
-                                {data.into_iter().map(|rec| {
-                                    view! {
-                                        <li class="border-l-4 border-blue-500 pl-3">
-                                            <span class="font-mono text-blue-600">{rec.code}</span>
-                                            <span class="ml-2 font-semibold">{rec.title}</span>
-                                        </li>
-                                    }
-                                }).collect_view()}
-                            </ul>
-                        }
+                    records.get().map(|data: Vec<String>| { // Type hint added here
+                        data.into_iter()
+                            .map(|rec| view! { 
+                                <div class="p-2 border border-slate-800 rounded">
+                                    {rec}
+                                </div> 
+                            })
+                            .collect_view()
                     })
                 }}
             </Transition>
