@@ -1,6 +1,7 @@
 use leptos::*;
 use leptos_router::*;
-use common::DecimalRecord; // Using our shared workspace crate!
+pub use common::DecimalRecord;
+pub mod app;
 
 #[component]
 pub fn App() -> impl IntoView {
