@@ -6,4 +6,3 @@ edition = "2021"
 [dependencies]
 serde = { workspace = true }
 chrono = { workspace = true }
-frontend = { path = "./frontend" }
