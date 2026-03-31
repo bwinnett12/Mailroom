@@ -20,12 +20,17 @@
     {
       devShells.${system}.default = pkgs.mkShell {
         buildInputs = with pkgs; [
+          (rust-bin.stable.latest.default.override {
+            targets = [ "wasm32-unknown-unknown" ];
+            extensions = [ "rust-src" "rust-analyzer" ];
+          })
           rustVersion
           pkg-config
           openssl
           libiconv
           trunk
           wasm-pack
+          nodejs
           
           # Optional: useful for Loco DB interactions
           sea-orm-cli 
@@ -37,10 +42,6 @@
           echo "🦀 Welcome to your Rust/Loco environment on NixOS!"
           echo "Rust version: $(rustc --version)"
         '';
-      };
-
-      rust-bin.stable.latest.default.override = {
-        targets = [ "wasm32-unknown-unknown" ];
       };
     };
 }
