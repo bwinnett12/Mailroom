@@ -39,7 +39,7 @@ impl Hooks for App {
         create_app::<Self>(mode, environment, config).await
     }
 
-    fn middlewares(_ctx: &AppContext) -> Result<Vec<Box<dyn loco_rs::controller::middleware::Handler>>> {
+    fn middlewares(_ctx: &AppContext) -> Result<Vec<Box<dyn Send + Sync + 'static>>> {
         Ok(vec![])
     }
 }
