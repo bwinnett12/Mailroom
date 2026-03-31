@@ -10,6 +10,7 @@ use loco_rs::controller::middleware::cors;
 use loco_rs::controller::AppRoutes;
 use loco_rs::app::Hooks;
 use loco_rs::config::Config;
+use loco_rs::task::Tasks;
 
 pub use axum::middleware::from_fn;
 
