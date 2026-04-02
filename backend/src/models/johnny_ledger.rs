@@ -20,7 +20,7 @@ pub enum Relation {}
 impl ActiveModelBehavior for ActiveModel {}
 
 impl Model {
-    /// Helper to find a specific decimal by its CID
+    /// Find a specific decimal by its CID (e.g., "10.01")
     pub async fn find_by_cid(db: &DatabaseConnection, cid: &str) -> ModelResult<Self> {
         let res = Entity::find_by_id(cid.to_owned()).one(db).await?;
         res.ok_or(loco_rs::Error::NotFound)
