@@ -3,3 +3,4 @@ pub mod users;
 pub mod notes;
 pub mod movies;
 pub mod record;
+pub mod master_index;

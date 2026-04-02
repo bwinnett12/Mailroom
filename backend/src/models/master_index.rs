@@ -3,7 +3,7 @@ use sea_orm::entity::prelude::*;
 use loco_rs::model::ModelResult;
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
-#[sea_orm(table_name = "johnny_ledger")]
+#[sea_orm(table_name = "master_index")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub cid: String,
