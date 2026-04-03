@@ -61,7 +61,7 @@ pub async fn add(State(ctx): State<AppContext>, Json(params): Json<Params>) -> R
     }).await?;
 
     // 5. Tell the user "Success!"
-    format::json(item)
+    format::json::<models::notes::Model>(item)
 }
 
 #[debug_handler]
@@ -74,12 +74,12 @@ pub async fn update(
     let mut item = item.into_active_model();
     params.update(&mut item);
     let item = item.update(&ctx.db).await?;
-    format::json(item)
+    format::json::<models::notes::Model>(item)
 }
 
 #[debug_handler]
 pub async fn remove(Path(id): Path<i32>, State(ctx): State<AppContext>) -> Result<Response> {
-    load_item(&ctx, id).await?.delete(&ctx.db).await?;
+    load_item::<models::notes::Model>(&ctx, id).await?.delete(&ctx.db).await?;
     format::empty()
 }
 
