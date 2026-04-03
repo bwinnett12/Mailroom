@@ -1,3 +1,4 @@
+
 {
   description = "Julia Data Science Environment for NixOS";
 
@@ -19,11 +20,11 @@
           stdenv.cc.cc.lib
           zlib
           glib
-          xorg.libX11
-          xorg.libXext
-          xorg.libXrender
-          xorg.libICE
-          xorg.libSM
+          libX11
+          libXext
+          libXrender
+          libICE
+          libSM
           libGL
           fontconfig
           freetype
