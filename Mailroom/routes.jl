@@ -1,9 +1,8 @@
 using Genie.Router
+using MailroomController
 
 route("/") do
   serve_static_file("welcome.html")
 end
 
-route("/hello") do
-  "Welcome to Julia! The time is $(now())"
-end
+route("/hello", MailroomController.hello)
