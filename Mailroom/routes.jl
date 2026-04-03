@@ -5,4 +5,6 @@ route("/") do
   serve_static_file("welcome.html")
 end
 
-route("/hello", MailroomController.temp2)
+route("/hello", MailroomController.hello)
+
+route("/temp4", MailroomController.temp2)
