@@ -1,0 +1,1 @@
+"/nix/store/4zj6daa4javkxwmnc9wvcw99p4jzljcm-julia-bin-1.12.5/bin/julia" --color=yes --depwarn=no --project=@. -q -i -- "%~dp0..\bootstrap.jl" %*
