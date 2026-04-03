@@ -28,11 +28,10 @@ impl BackgroundWorker<NoteTaggerArgs> for Worker {
 
     async fn perform(&self, vars: NoteTaggerArgs) -> Result<()> {
         // 1. Fetch the note - explicitly type the result
-        let note: notes::Model = notes::Entity::find_by_id(vars.note_id)
+        let note: Option<notes::Model> = notes::Entity::find_by_id(vars.note_id)
             .one(&self.ctx.db)
             .await
-            .map_err(|e| Error::msg(e))? 
-            .ok_or_else(|| Error::string("Note not found"))?;
+            .map_err(|e| Error::msg(e))?;
 
         // 2. Setup the AI Request
         let client = reqwest::Client::new();

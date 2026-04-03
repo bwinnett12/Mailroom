@@ -121,14 +121,10 @@ impl Model {
     ///
     /// When could not find user by the given token or DB query error ot token expired
     pub async fn find_by_magic_token(db: &DatabaseConnection, token: &str) -> ModelResult<Self> {
-        let user = users::Entity::find()
-            .filter(
-                query::condition()
-                    .eq(users::Column::MagicLinkToken, token)
-                    .build(),
-            )
+        let user: Option<users::Model> = users::Entity::find()
+            .filter(users::Column::Email.eq(&params.email))
             .one(db)
-            .await?;
+            .await?;    
 
         let user = user.ok_or_else(|| ModelError::EntityNotFound)?;
         if let Some(expired_at) = user.magic_link_expiration {
@@ -157,12 +153,8 @@ impl Model {
     ///
     /// When could not find user by the given token or DB query error
     pub async fn find_by_reset_token(db: &DatabaseConnection, token: &str) -> ModelResult<Self> {
-        let user = users::Entity::find()
-            .filter(
-                model::query::condition()
-                    .eq(users::Column::ResetToken, token)
-                    .build(),
-            )
+        let user: Option<users::Model> = users::Entity::find()
+            .filter(users::Column::Email.eq(&params.email))
             .one(db)
             .await?;
         user.ok_or_else(|| ModelError::EntityNotFound)
@@ -175,16 +167,12 @@ impl Model {
     /// When could not find user  or DB query error
     pub async fn find_by_pid(db: &DatabaseConnection, pid: &str) -> ModelResult<Self> {
         let parse_uuid = Uuid::parse_str(pid).map_err(|e| ModelError::Any(e.into()))?;
-        let user = users::Entity::find()
-            .filter(
-                model::query::condition()
-                    .eq(users::Column::Pid, parse_uuid)
-                    .build(),
-            )
+        let user: Option<users::Model> = users::Entity::find()
+            .filter(users::Column::Email.eq(&params.email))
             .one(db)
             .await?;
-        user.ok_or_else(|| ModelError::EntityNotFound)
-    }
+                user.ok_or_else(|| ModelError::EntityNotFound)
+            }
 
     /// finds a user by the provided api key
     ///
@@ -192,12 +180,8 @@ impl Model {
     ///
     /// When could not find user by the given token or DB query error
     pub async fn find_by_api_key(db: &DatabaseConnection, api_key: &str) -> ModelResult<Self> {
-        let user = users::Entity::find()
-            .filter(
-                model::query::condition()
-                    .eq(users::Column::ApiKey, api_key)
-                    .build(),
-            )
+        let user: Option<users::Model> = users::Entity::find()
+            .filter(users::Column::Email.eq(&params.email))
             .one(db)
             .await?;
         user.ok_or_else(|| ModelError::EntityNotFound)
