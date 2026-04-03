@@ -66,7 +66,8 @@ impl BackgroundWorker<NoteTaggerArgs> for Worker {
         // 5. Update the record
         let mut note: notes::ActiveModel = note.into();
         note.tags = Set(Some(tags.to_string()));
-        note.update(&self.ctx.db).await.map_err(|e| Error::msg(e))?;
+        let active_note: notes::ActiveModel = note.into_active_model();
+        active_note.update(&self.ctx.db).await.map_err(|e| Error::msg(e))?;
 
         Ok(())
     }

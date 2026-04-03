@@ -61,12 +61,8 @@ impl ActiveModelBehavior for super::_entities::users::ActiveModel {
 #[async_trait]
 impl Authenticable for Model {
     async fn find_by_api_key(db: &DatabaseConnection, api_key: &str) -> ModelResult<Self> {
-        let user = users::Entity::find()
-            .filter(
-                model::query::condition()
-                    .eq(users::Column::ApiKey, api_key)
-                    .build(),
-            )
+        let user: Option<users::Model> = users::Entity::find()
+            .filter(users::Column::Pid.eq(pid)) // or whatever filter you are using
             .one(db)
             .await?;
         user.ok_or_else(|| ModelError::EntityNotFound)
@@ -84,14 +80,11 @@ impl Model {
     ///
     /// When could not find user by the given token or DB query error
     pub async fn find_by_email(db: &DatabaseConnection, email: &str) -> ModelResult<Self> {
-        let user = users::Entity::find()
-            .filter(
-                model::query::condition()
-                    .eq(users::Column::Email, email)
-                    .build(),
-            )
+        let user: Option<users::Model> = users::Entity::find()
+            .filter(users::Column::Pid.eq(pid)) // or whatever filter you are using
             .one(db)
             .await?;
+
         user.ok_or_else(|| ModelError::EntityNotFound)
     }
 
@@ -104,14 +97,12 @@ impl Model {
         db: &DatabaseConnection,
         token: &str,
     ) -> ModelResult<Self> {
-        let user = users::Entity::find()
-            .filter(
-                model::query::condition()
-                    .eq(users::Column::EmailVerificationToken, token)
-                    .build(),
-            )
+
+        let user: Option<users::Model> = users::Entity::find()
+            .filter(users::Column::Pid.eq(pid)) // or whatever filter you are using
             .one(db)
             .await?;
+
         user.ok_or_else(|| ModelError::EntityNotFound)
     }
 
@@ -266,7 +257,8 @@ impl ActiveModel {
     ) -> ModelResult<Model> {
         self.email_verification_sent_at = ActiveValue::set(Some(Local::now().into()));
         self.email_verification_token = ActiveValue::Set(Some(Uuid::new_v4().to_string()));
-        self.update(db).await.map_err(ModelError::from)
+        let active_model: users::ActiveModel = self.into_active_model();
+        active_model.update(db).await.map_err(ModelError::from)
     }
 
     /// Sets the information for a reset password request,
@@ -284,7 +276,8 @@ impl ActiveModel {
     pub async fn set_forgot_password_sent(mut self, db: &DatabaseConnection) -> ModelResult<Model> {
         self.reset_sent_at = ActiveValue::set(Some(Local::now().into()));
         self.reset_token = ActiveValue::Set(Some(Uuid::new_v4().to_string()));
-        self.update(db).await.map_err(ModelError::from)
+        let active_model: users::ActiveModel = self.into_active_model();
+        active_model.update(db).await.map_err(ModelError::from)
     }
 
     /// Records the verification time when a user verifies their
@@ -298,7 +291,8 @@ impl ActiveModel {
     /// when has DB query error
     pub async fn verified(mut self, db: &DatabaseConnection) -> ModelResult<Model> {
         self.email_verified_at = ActiveValue::set(Some(Local::now().into()));
-        self.update(db).await.map_err(ModelError::from)
+        let active_model: users::ActiveModel = self.into_active_model();
+        active_model.update(db).await.map_err(ModelError::from)
     }
 
     /// Resets the current user password with a new password and
@@ -319,7 +313,8 @@ impl ActiveModel {
             ActiveValue::set(hash::hash_password(password).map_err(|e| ModelError::Any(e.into()))?);
         self.reset_token = ActiveValue::Set(None);
         self.reset_sent_at = ActiveValue::Set(None);
-        self.update(db).await.map_err(ModelError::from)
+        let active_model: users::ActiveModel = self.into_active_model();
+        active_model.update(db).await.map_err(ModelError::from)
     }
 
     /// Creates a magic link token for passwordless authentication.
@@ -335,7 +330,8 @@ impl ActiveModel {
 
         self.magic_link_token = ActiveValue::set(Some(random_str));
         self.magic_link_expiration = ActiveValue::set(Some(expired.into()));
-        self.update(db).await.map_err(ModelError::from)
+        let active_model: users::ActiveModel = self.into_active_model();
+        active_model.update(db).await.map_err(ModelError::from)
     }
 
     /// Verifies and invalidates the magic link after successful authentication.
@@ -348,6 +344,7 @@ impl ActiveModel {
     pub async fn clear_magic_link(mut self, db: &DatabaseConnection) -> ModelResult<Model> {
         self.magic_link_token = ActiveValue::set(None);
         self.magic_link_expiration = ActiveValue::set(None);
-        self.update(db).await.map_err(ModelError::from)
+        let active_model: users::ActiveModel = self.into_active_model();
+        active_model.update(db).await.map_err(ModelError::from)
     }
 }

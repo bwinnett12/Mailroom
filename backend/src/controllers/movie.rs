@@ -46,7 +46,7 @@ pub async fn update(
     let item = load_item(&ctx, id).await?;
     let mut item = item.into_active_model();
     params.update(&mut item);
-    let item = item.update(&ctx.db).await?;
+    let item: models::_entities::movies::Model = item.update(&ctx.db).await?;
     format::json(item)
 }
 
@@ -58,7 +58,7 @@ pub async fn remove(Path(id): Path<i32>, State(ctx): State<AppContext>) -> Resul
 
 #[debug_handler]
 pub async fn get_one(Path(id): Path<i32>, State(ctx): State<AppContext>) -> Result<Response> {
-    format::json(load_item(&ctx, id).await?)
+    format::json::<models::_entities::movies::Model>(load_item(&ctx, id).await?)
 }
 
 pub fn routes() -> Routes {
