@@ -1,0 +1,7 @@
+production:
+  adapter: postgresql
+  host: <%= ENV["DB_HOST"] %>
+  database: <%= ENV["DB_NAME"] %>
+  username: <%= ENV["DB_USER"] %>
+  password: "" # Handled by local peer/trust auth
+  port: 5432
