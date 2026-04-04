@@ -31,19 +31,37 @@
         ];
       in
       {
+
+        packages.default = pkgs.stdenv.mkDerivation {
+          name = "mailroom-app";
+          src = ./.;
+          buildInputs = [ pkgs.julia-bin ];
+          installPhase = ''
+            mkdir -p $out/share/mailroom
+            cp -r . $out/share/mailroom
+          '';
+        };
+
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
-            julia-bin # The official binary distribution
+            julia-bin # The official binary distribution #TODO - Maybe this should be set to a version then adjusted incrementally
             git
           ];
 
-          # This is the "magic" for NixOS: it tells the dynamic linker where
-          # to find the libraries that Julia's downloaded artifacts need.
+          ### Replace statement with statement below and it will reset
+          # export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath julia-libs}:$LD_LIBRARY_PATH
+
+
+          # This is where the dynamic linker finds the libraries that Julia's downloaded artifacts needs.
           shellHook = ''
-            export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath julia-libs}:$LD_LIBRARY_PATH
-            echo "--- Julia Data Science Environment Loaded ---"
+            export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib pkgs.zlib ]}
+
+            echo "--- Julia Genie Environment Loaded ---"
             echo "Run 'julia' and then 'using Pkg; Pkg.instantiate()' to begin."
+            echo "Mailroom Dev Environment Ready"
           '';
         };
-      });
+      }) {
+        nixosModules.mailroom = import ./nixos-module.nix;
+      };
 }
