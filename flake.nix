@@ -55,10 +55,17 @@
 
           # This is where the dynamic linker finds the libraries that Julia's downloaded artifacts needs.
           shellHook = ''
-            export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib pkgs.zlib ]}
-
             echo "--- Julia Genie Environment Loaded ---"
             echo "Run 'julia' and then 'using Pkg; Pkg.instantiate()' to begin."
+            echo "Mailroom Dev Environment Ready"
+
+            # This colors the prompt and adds the (Mailroom) prefix
+            # \u = user, \h = host, \w = working directory
+            export PS1="\n\[\033[1;32m\](Mailroom)\[\033[0m\] [\[\033[1;34m\]\u@\h:\w\[\033[0m\]]\$ "
+
+            export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath julia-libs}:$LD_LIBRARY_PATH
+            
+            echo "--- Julia Genie Environment Loaded ---"
             echo "Mailroom Dev Environment Ready"
           '';
         };
