@@ -8,7 +8,8 @@
   };
 
   outputs = { self, nixpkgs, utils }:
-    utils.lib.eachDefaultSystem (system:
+    # This function returns a set keyed by system (e.g., packages.x86_64-linux)
+    (utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs {
           inherit system;
@@ -61,7 +62,9 @@
             echo "Mailroom Dev Environment Ready"
           '';
         };
-      }) {
+      })) {
         nixosModules.mailroom = import ./nixos-module.nix;
       };
 }
+
+
