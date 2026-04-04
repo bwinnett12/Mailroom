@@ -62,9 +62,10 @@
             echo "Mailroom Dev Environment Ready"
           '';
         };
-      })) {
-        nixosModules.mailroom = import ./nixos-module.nix;
-      };
+      }
+    )) // {
+      nixosModules.mailroom = import ./nixos-module.nix;
+    };
 }
 
 
