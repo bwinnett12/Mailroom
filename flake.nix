@@ -58,7 +58,6 @@
             export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath julia-libs}:$LD_LIBRARY_PATH
             echo "--- Julia Genie Environment Loaded ---"
             echo "Run 'julia' and then 'using Pkg; Pkg.instantiate()' to begin."
-            echo "Mailroom Dev Environment Ready"
 
             # This colors the prompt and adds the (Mailroom) prefix
             # \u = user, \h = host, \w = working directory
