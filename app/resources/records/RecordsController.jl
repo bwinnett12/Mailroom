@@ -1,5 +1,11 @@
+# file: app/resources/records/RecordsController.jl
+
 module RecordsController
-using Genie.Renderer.Json, SearchLight, App.RecordIndex
+
+using Genie.Renderer.Html  # For rendering HTML templates
+using Genie.Renderer.Json  # For API responses
+using App                  # Gives access to your global App state/models
+using Dates, SearchLight
 
 export search_pending
 
@@ -14,11 +20,8 @@ function search_pending()
                    ["unprocessed", threshold]))
 
   # 3. Return as JSON for your frontend or AI agent
-  return json(Dict("status" => "working"))
+  return json(Dict("status" => "success", "data" => "Pending records list"))
 end
 
-# Helper to safely parse params
-parse_float(s::String) = tryparse(Float64, s)
-parse_float(n::Real) = Float64(n)
-
+  
 end

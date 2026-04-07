@@ -1,5 +1,5 @@
 using Genie.Router
-using App.RecordsController
+using RecordsController
 
 route("/") do
   serve_static_file("welcome.html")
