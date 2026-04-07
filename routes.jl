@@ -1,5 +1,5 @@
 using Genie.Router
-using .MailroomController
+using App.RecordsController
 
 route("/") do
   serve_static_file("welcome.html")
