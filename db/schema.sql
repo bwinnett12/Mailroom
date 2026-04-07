@@ -31,6 +31,7 @@ CREATE TABLE record_index (
 	------ Index number
 	-- -- 82.2 is the unclassified section
     id_index TEXT NOT NULL DEFAULT "82.2-A", -- 
+	
 
 
     ------  ------  ------  ------  ------  ------  ------  
@@ -54,28 +55,26 @@ CREATE TABLE record_index (
 	-- -- Not yet Implemented.   --  Indexes that have not been implemented yet
 	-- -- Not yet Implemented: Priority  -- Indexes that have not been made but are a priority to do so
 
-    status index_status DEFAULT 'not_implemented',
-
-
-	
-	------ -- Metadata 
-	-- I'm less familiar with this but I know that it will be helpful for RAG, PostgreSQL, and scraping useful information for an AI
-	metadata JSONB DEFAULT '{}',  -- Store specific tags and weird data elements
-	
+    status index_status DEFAULT 'NOT-IMPLEMENTED',
 
 
 	------ -- Time stamp at creation time
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
 	------ -- Time stamp at last update time
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
 
+	
+	------ -- Metadata 
+	-- Helpful for RAG, PostgreSQL, and scraping useful information for an AI
+	metadata JSONB DEFAULT '{}',  -- Store specific tags and weird data elements
 
 
 	------ -- Index path
 	------ All Indexes are in one repo... But it speeds things up
-	source path TEXT DEFAULT '' -- Replace this with the best format for a string
+	source_path TEXT DEFAULT ''
 
 );
 
 CREATE INDEX idx_inbox_metadata ON record_index USING GIN (metadata);
 CREATE INDEX idx_inbox_processed ON record_index (processed) WHERE processed IS FALSE;
+
