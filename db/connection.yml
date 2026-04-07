@@ -2,7 +2,7 @@
 development:
   adapter: Postgres
   database: mailroom_dev
-  host: /run/postgresql  # This is the standard NixOS socket path
+  host: 127.0.0.1  # This is the standard NixOS socket path
   port: 5432
   username: tarobutter   # Or 'pomona' if running the service
   password: ""           # NixOS uses ident/peer auth by default (no password)

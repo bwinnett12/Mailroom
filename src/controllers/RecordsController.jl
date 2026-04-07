@@ -1,6 +1,8 @@
 module RecordsController
 using Genie.Renderer.Json, SearchLight, App.RecordIndex
 
+export search_pending
+
 function search_pending()
   # 1. Grab the reliability threshold from the URL params (e.g., /search?min=0.8)
   threshold = getpayload(:min, 0.5) |> parse_float
@@ -12,7 +14,7 @@ function search_pending()
                    ["unprocessed", threshold]))
 
   # 3. Return as JSON for your frontend or AI agent
-  return json(Dict(:records => pending_records))
+  return json(Dict("status" => "working"))
 end
 
 # Helper to safely parse params
