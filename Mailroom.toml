@@ -1,0 +1,21 @@
+bind_addr = "0.0.0.0:3000"
+jd_root   = "./jd"
+
+# --- Agents ---
+
+[[agents]]
+name     = "local-llama"
+base_url = "http://localhost:11434"   # Ollama default
+accepts  = ["text", "camera", "file"]
+jd_prefix = "10"                      # JD area 10: AI / Language
+
+[[agents]]
+name     = "local-llava"
+base_url = "http://localhost:11434"
+accepts  = ["camera", "video"]
+jd_prefix = "11"                      # JD area 11: Vision
+
+# [[agents]]
+# name     = "n8n-webhook"
+# base_url = "http://localhost:5678"
+# accepts  = ["*"]

@@ -1,0 +1,4 @@
+ffmpeg -i srt://loom.tail4b1127.ts.net:8888 -i srt://loom.tail4b1127.ts.net:8889 \
+  -filter_complex "[0:a][1:a]join=inputs=2:channel_layout=stereo[a]" \
+  -map "[a]" -c:a aac output-stereo.aac \
+  -t 30 clip-ch1.aac

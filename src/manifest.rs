@@ -1,0 +1,195 @@
+// src/manifest.rs
+//
+// Defines the Rust types that map to a .mailroom file.
+// When the Mailroom reads a .mailroom file from disk, it deserializes
+// the TOML into these structs.
+//
+// Rust concept — Deserialization:
+//   serde + the toml crate work together. serde defines the *process*
+//   of converting data formats into Rust types. toml is the *format*.
+//   #[derive(Deserialize)] tells serde to auto-generate the code that
+//   reads TOML fields and fills in your struct fields by name.
+//   If a field in the TOML doesn't match a field in the struct,
+//   serde returns an error. If a field is missing and marked
+//   Option<T>, serde fills it with None instead of erroring.
+
+use serde::Deserialize;
+// We only need Deserialize here — we're reading .mailroom files,
+// not writing them (except for [about], which we'll handle separately).
+
+// ── Top-level struct ──────────────────────────────────────────────────────────
+// This represents the entire .mailroom file.
+// Each nested section (like [routing], [library]) becomes a field
+// whose type is its own struct.
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Manifest {
+    // ── Identity ──────────────────────────────────────────────────────────
+    pub id:   String,
+    // The JD address. e.g. "35.2"
+
+    pub name: String,
+    // Human name. e.g. "Physical"
+
+    pub path: Option<String>,
+    // The relative path of this node's directory within /storage/Library.
+    // Example: "34_My-story/34.2_Journal"
+    //
+    // Optional — if absent, the Mailroom derives the path from the id.
+    // Most nodes won't set this explicitly. It's only needed when the
+    // folder name doesn't follow the standard JD naming convention.
+    //
+    // Set via .mailroom:
+    //   path = "34_My-story/34.2_Journal"
+
+    pub kind: NodeKind,
+    // What kind of node this is. Parsed from a string like "leaf".
+    // NodeKind is an enum defined below — serde maps the string to
+    // the right variant automatically.
+
+    // ── Data contract ──────────────────────────────────────────────────────
+    #[serde(default)]
+    // `default` means: if `accepts` is missing from the TOML entirely,
+    // use Vec::default() which is an empty Vec. Without this, a missing
+    // field would be an error.
+    pub accepts: Vec<String>,
+    // Data types this node accepts. e.g. ["text/journal", "data/biometric"]
+
+    #[serde(default)]
+    pub store: Option<StoreKind>,
+    // How data is written here. None if this node doesn't store directly.
+
+    // ── Optional sections ──────────────────────────────────────────────────
+    #[serde(default)]
+    pub routing: Option<RoutingConfig>,
+    // Present only on domain/collection nodes that route to children.
+
+    #[serde(default)]
+    pub library: Option<LibraryConfig>,
+    // Present only if this node mirrors data to 5X_Library.
+
+    #[serde(default)]
+    pub mailroom: Option<MailroomConfig>,
+    // Mailroom behaviour flags. Falls back to defaults if absent.
+
+    #[serde(default)]
+    pub about: Option<AboutBlock>,
+    // AI-maintained summary block. None until first `mailroom refresh`.
+}
+impl Manifest {
+    /// Returns the effective path for this node within /storage/Library.
+    /// Uses the explicit `path` field if set, otherwise derives from id and name.
+    /// Example: id="34.2", name="Journal" → "34.2_Journal"
+    pub fn effective_path(&self) -> String {
+        self.path.clone().unwrap_or_else(|| {
+            // Derive: "34.2_Journal" from id="34.2" name="Journal"
+            format!("{}_{}", self.id, self.name)
+            // This matches the JD naming convention you already use.
+            // The folder on disk should match this pattern.
+        })
+    }
+}
+
+// ── NodeKind ──────────────────────────────────────────────────────────────────
+// An enum represents a fixed set of possible values.
+// This is safer than a plain String — the compiler guarantees you
+// can only have valid kinds, and match statements must handle all of them.
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+// rename_all = "lowercase" means serde expects "domain", "leaf" etc.
+// in the TOML — not "Domain" or "LEAF".
+pub enum NodeKind {
+    Domain,      // top-level area, routes to children
+    Collection,  // mid-level grouping, may store and route
+    Leaf,        // end node, stores directly
+    Log,         // append-only, timestamped
+    Archive,     // cold storage
+    Index,       // metadata only, points elsewhere
+    Inferred,    // auto-generated stub, awaiting review
+}
+
+// ── StoreKind ─────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum StoreKind {
+    Append,      // each entry is a new file
+    Overwrite,   // single canonical file, replaced on update
+    Collection,  // new file per item, organised by date or type
+    None,        // this node doesn't store
+}
+
+// ── RoutingConfig ─────────────────────────────────────────────────────────────
+// Represents the [routing] section.
+// It's a flat map of data-type string → JD address string.
+// e.g. { "text/lab-result" = "35.4", "data/biometric" = "35.2" }
+
+use std::collections::HashMap;
+// HashMap<K, V> is Rust's dictionary type.
+// K = key type, V = value type.
+// We use it here because [routing] is open-ended —
+// we don't know the keys at compile time.
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RoutingConfig {
+    #[serde(flatten)]
+    // `flatten` tells serde: don't look for a nested object —
+    // treat all the key-value pairs in [routing] as entries
+    // in this HashMap directly.
+    pub rules: HashMap<String, String>,
+    // Key:   data type  e.g. "text/lab-result"
+    // Value: JD address e.g. "35.4"
+}
+
+// ── LibraryConfig ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LibraryConfig {
+    pub mirror:    bool,
+    // Whether to mirror incoming data to 5X_Library.
+
+    pub target_id: String,
+    // The library address to mirror to. e.g. "52.3"
+}
+
+// ── MailroomConfig ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MailroomConfig {
+    #[serde(default = "default_true")]
+    pub active: bool,
+    // false = Mailroom ignores this node entirely.
+    // Defaults to true — `default_true` is a helper function below.
+
+    #[serde(default)]
+    pub requires_auth: bool,
+    // true = only authenticated sources may write here.
+
+    #[serde(default)]
+    pub notify_on_write: bool,
+    // true = emit a log entry to 88_Logs on every write.
+
+    #[serde(default)]
+    pub ai_classify: bool,
+    // true = ask AI to confirm routing before storing.
+}
+
+fn default_true() -> bool {
+    // serde's `default` attribute can point to a function
+    // when the default isn't the type's own Default::default().
+    // bool's default is false, but we want active = true when absent.
+    true
+}
+
+// ── AboutBlock ────────────────────────────────────────────────────────────────
+// The [about] section — written by the AI, read by the registry.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AboutBlock {
+    pub summary:     String,
+    // One-sentence AI-generated description of this node.
+
+    pub last_synced: String,
+    // ISO 8601 timestamp of the last `mailroom refresh` run.
+    // e.g. "2025-06-15T14:32:00Z"
+}

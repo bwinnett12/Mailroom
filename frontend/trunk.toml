@@ -1,7 +1,0 @@
-[serve]
-# The address to listen on.
-address = "0.0.0.0"
-# The port to listen on.
-port = 5051
-# Open the browser automatically (set to false since you're likely on a remote shell)
-open = false

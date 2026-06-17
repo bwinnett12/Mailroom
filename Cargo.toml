@@ -1,13 +1,18 @@
-[workspace]
-resolver = "2"
-members = [
-    "backend",
-    "common",
-    "frontend",
-]
+[package]
+name = "mailroom"
+version = "0.1.0"
+edition = "2021"
 
-[workspace.dependencies]
-serde = { version = "1.0", features = ["derive"] }
+[dependencies]
+anyhow  = "1"
+axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
-loco-rs = { version = "0.16" }
-common = { path = "./common" }
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+toml    = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid   = { version = "1", features = ["v4", "serde"] }
+walkdir = "2"

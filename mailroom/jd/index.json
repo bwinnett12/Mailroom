@@ -1,0 +1,51 @@
+[
+  {
+    "address": "10",
+    "title": "AI — Language",
+    "description": "Text-based AI pipelines and language models",
+    "agent": "local-llama",
+    "tags": ["ai", "text", "llm"]
+  },
+  {
+    "address": "10.01",
+    "title": "Inbound Prompts",
+    "description": "Raw text prompts arriving via /ingest/text",
+    "agent": "local-llama",
+    "tags": ["prompt", "text"]
+  },
+  {
+    "address": "10.02",
+    "title": "Webhook Payloads",
+    "description": "JSON events from external services",
+    "agent": "local-llama",
+    "tags": ["webhook", "json"]
+  },
+  {
+    "address": "11",
+    "title": "AI — Vision",
+    "description": "Camera frames and video processed by vision models",
+    "agent": "local-llava",
+    "tags": ["ai", "vision", "camera"]
+  },
+  {
+    "address": "11.01",
+    "title": "Camera Frames",
+    "description": "Still images from camera sources",
+    "agent": "local-llava",
+    "tags": ["camera", "image"]
+  },
+  {
+    "address": "11.02",
+    "title": "Video Clips",
+    "description": "Short video segments",
+    "agent": "local-llava",
+    "tags": ["video"]
+  },
+  {
+    "address": "12",
+    "title": "Audio",
+    "description": "Microphone input and audio files",
+    "agent": null,
+    "tags": ["audio", "microphone"]
+  }
+]
