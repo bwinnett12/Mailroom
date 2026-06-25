@@ -11,9 +11,10 @@ pub mod envelope;
 // Declare the envelope submodule.
 // Rust will look for src/routes/envelope.rs
 pub mod entries;
+pub mod journal;
 
 use std::sync::Arc;
-use axum::{routing::get, Router};
+use axum::{routing::{get, post}, Router};
 use crate::state::AppState;
 
 /// Build and return the complete application router.
@@ -28,6 +29,12 @@ pub fn router(state: Arc<AppState>) -> Router {
 
 		// -- Multiple Entries
 		.route("/envelopes", get(entries::list))
+
+        // -- Curate Journal
+        .route("/journal",         post(journal::write))
+
+        // -- Sumarize Journal using LocalAI
+        .route("/journal/summary", get(journal::summary)) 
 
         // ── Attach state ──────────────────────────────────────────────
         .with_state(state)
