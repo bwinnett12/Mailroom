@@ -1,15 +1,14 @@
 // src/routes/journal.rs
 //
-// Convenience routes for the journal (34.2_Journal).
+// Routes for journal writing and summarisation.
 //
 // POST /journal
-//   Accepts plain text — wraps it in an envelope addressed to 34.2
-//   automatically. No need to know the JD system to write a journal entry.
+//   Accepts plain text, routes to 34.2_Journal automatically.
 //
-// GET /journal/summary
-//   Reads all entries written today, sends them to LocalAI, returns
-//   a daily summary. The summary itself is also saved as an entry
-//   so it becomes part of the permanent record.
+// POST /journal/summary
+//   Flexible summarisation — accepts a date, explicit notes, custom prompt,
+//   and JD address. Generates narrative summary + metrics via LocalAI.
+//   Saves a daily document to 34.4_Generated-summary/daily/
 
 use std::sync::Arc;
 
@@ -42,24 +41,14 @@ pub struct JournalEntry {
     pub created_at: Option<chrono::DateTime<Utc>>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct JournalResponse {
-    pub envelope_id: String,
-    pub file:        String,
-    pub jd_address:  String,
-}
-
 /// POST /journal
 ///
 /// Convenience endpoint — wraps text in an envelope and routes it
-/// to 34.2_Journal automatically. The caller just sends text.
+/// to 34.2_Journal automatically.
 pub async fn write(
     State(state): State<Arc<AppState>>,
     Json(body):   Json<JournalEntry>,
 ) -> impl IntoResponse {
-    // Build an InboundEnvelope addressed to the journal.
-    // This is exactly what the POST /envelope endpoint does,
-    // but with the JD address pre-filled.
     let inbound = InboundEnvelope {
         source:     Source::Manual,
         data_type:  "text/journal".to_string(),
@@ -71,7 +60,6 @@ pub async fn write(
 
     let envelope = inbound.into_envelope();
 
-    // Look up the journal node in the registry.
     let manifest = match state.registry.get("34.2") {
         Some(m) => m,
         None => {
@@ -80,7 +68,7 @@ pub async fn write(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({
                     "error": "journal node not found in registry",
-                    "hint": "ensure 34.2_Journal has a .mailroom file in your vault"
+                    "hint":  "ensure 34.2_Journal has a .mailroom file in your vault"
                 })),
             ).into_response();
         }
@@ -90,211 +78,438 @@ pub async fn write(
 
     match store::store(&envelope, &state.library_root, &jd_path).await {
         Ok(result) => {
-            tracing::info!(
-                file = %result.content_path.display(),
-                "journal entry written"
-            );
-
+            tracing::info!(file = %result.content_path.display(), "journal entry written");
             (StatusCode::CREATED, Json(serde_json::json!({
                 "envelope_id": envelope.id.to_string(),
                 "file":        result.content_path.display().to_string(),
                 "jd_address":  "34.2",
             }))).into_response()
         }
-
         Err(e) => {
             tracing::error!(error = %e, "failed to write journal entry");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
+            (StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() }))
             ).into_response()
         }
     }
 }
 
-// ── GET /journal/summary ──────────────────────────────────────────────────────
+// ── POST /journal/summary ─────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize)]
-pub struct SummaryResponse {
-    pub date:        String,
-    pub entry_count: usize,
-    pub summary:     String,
-    pub saved_to:    Option<String>,
-    // Path where the summary was saved, if successful.
+/// What the caller sends to request a summary.
+/// All fields are optional — sensible defaults apply when absent.
+#[derive(Debug, Deserialize)]
+pub struct SummaryRequest {
+    /// Date to summarise in YYYYMMDD format.
+    /// If absent, uses today (UTC).
+    /// Example: "20260620" to summarise a past day.
+    pub date: Option<String>,
+
+    /// Explicit notes to summarise instead of reading from disk.
+    /// If provided, skips file reading entirely.
+    /// Useful for summarising arbitrary text, not just journal entries.
+    /// Example: ["ran 5k", "felt tired", "good meeting at 3pm"]
+    pub notes: Option<Vec<String>>,
+
+    /// Custom prompt to use for the narrative summary.
+    /// If absent, uses the default daily journal summary prompt.
+    /// Example: "Summarise these notes as a health check-in"
+    pub prompt: Option<String>,
+
+    /// JD address to read entries from.
+    /// Defaults to "34.2" (Journal) if absent.
+    /// Example: "35.2" to summarise physical health entries instead.
+    pub jd_address: Option<String>,
 }
 
-/// GET /journal/summary
+/// What the caller receives back.
+#[derive(Debug, Serialize)]
+pub struct SummaryResponse {
+    /// The date that was summarised (YYYYMMDD).
+    pub date: String,
+
+    /// How many entries were found and summarised.
+    pub entry_count: usize,
+
+    /// The narrative summary generated by LocalAI.
+    pub summary: String,
+
+    /// Metrics extracted by LocalAI from the entries.
+    pub metrics: DailyMetrics,
+
+    /// Path where the daily document was saved, if successful.
+    pub saved_to: Option<String>,
+}
+
+/// Metrics extracted from journal entries by LocalAI.
+/// All fields are Option — AI may not be able to determine every metric.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DailyMetrics {
+    pub happiness:     Option<u8>,
+    pub energy:        Option<u8>,
+    pub focus:         Option<u8>,
+    pub stress:        Option<u8>,
+    pub sleep_quality: Option<u8>,
+    pub exercise:      Option<bool>,
+    pub themes:        Vec<String>,
+    pub milestones:    Vec<String>,
+    /// true = AI wasn't confident, human should review metrics
+    pub needs_review:  bool,
+}
+
+/// POST /journal/summary
 ///
-/// Reads all journal entries written today, sends them to LocalAI,
-/// and returns a summary. The summary is also saved back to 34.2_Journal
-/// as a pinned entry so it becomes part of the permanent record.
+/// Flexible summarisation endpoint.
+/// Three modes:
+///   1. No body         → summarise today's journal entries
+///   2. { date }        → summarise a specific past date
+///   3. { notes }       → summarise arbitrary provided notes
+///   4. { jd_address }  → summarise entries from a different JD node
 pub async fn summary(
     State(state): State<Arc<AppState>>,
+    body: Option<Json<SummaryRequest>>,
+    // Option<Json<...>> — body is optional.
+    // If the caller sends no body, body is None and we use defaults.
+    // If they send a body, we unwrap it and use their values.
 ) -> impl IntoResponse {
-	let today = Utc::now().format("%Y%m%d").to_string();
-    // Local::now() uses the server's local timezone — correct for a
-    // personal journal. Utc::now() would give the wrong "day" if you're
-    // in a timezone behind UTC.
+    // ── Resolve request parameters ────────────────────────────────────────
+    let req = body.map(|Json(b)| b).unwrap_or_else(|| SummaryRequest {
+        date:       None,
+        notes:      None,
+        prompt:     None,
+        jd_address: None,
+    });
 
-    let journal_dir = state.library_root
-        .join("34_My-story")
-        .join("34.2_Journal")
-        .join("entries");
+    let today = Utc::now().format("%Y%m%d").to_string();
+    let date  = req.date.unwrap_or_else(|| today.clone());
+    let date_display = format!(
+        "{}-{}-{}",
+        &date[..4], &date[4..6], &date[6..8]
+    );
+    // "20260625" → "2026-06-25" for human-readable display
 
-    if !journal_dir.exists() {
-        return (StatusCode::OK, Json(SummaryResponse {
-            date:        today,
-            entry_count: 0,
-            summary:     "No journal entries found yet.".to_string(),
-            saved_to:    None,
-        })).into_response();
-    }
+    let jd_address = req.jd_address.unwrap_or_else(|| "34.2".to_string());
 
-    // ── Collect today's entries ───────────────────────────────────────────
-    let mut entries: Vec<String> = Vec::new();
+    // ── Get entries — from request or from disk ───────────────────────────
+    let (entries, entry_count) = if let Some(notes) = req.notes {
+        // Caller provided explicit notes — use them directly.
+        // No disk access needed.
+        let count = notes.len();
+        let text  = notes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| format!("[Note {}] {}", i + 1, n.trim()))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        (text, count)
 
-    let mut dir = match fs::read_dir(&journal_dir).await {
-        Ok(d)  => d,
-        Err(e) => {
-            tracing::error!(error = %e, "failed to read journal directory");
-            return (StatusCode::INTERNAL_SERVER_ERROR,
+    } else {
+        // Read entries from disk for the given date and JD address.
+        match read_entries_for_date(&state, &jd_address, &date).await {
+            Ok((text, count)) => (text, count),
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "error": e.to_string() }))
-            ).into_response();
+            ).into_response(),
         }
     };
 
-    // Walk the entries directory, collect files from today.
-    while let Ok(Some(entry)) = dir.next_entry().await {
-        // next_entry() is async — it suspends while the OS reads the dir.
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-
-        // Skip meta files — we only want content files.
-        // Skip summary files from previous runs.
-        if name.ends_with(".meta.json") || name.contains("_SUMMARY_") {
-            continue;
-        }
-
-        // Our filename format: 20260625T020721Z_MAN_34.2_eff58236.md
-        // The first 8 chars are the date: 20260625
-        if name.starts_with(&today) {
-            match fs::read_to_string(entry.path()).await {
-                Ok(content) => {
-                    if !content.trim().is_empty() {
-                        entries.push(content);
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        file  = %name,
-                        error = %e,
-                        "failed to read entry — skipping"
-                    );
-                }
-            }
-        }
-    }
-
-    let entry_count = entries.len();
-
-    if entries.is_empty() {
-		return (StatusCode::OK, Json(SummaryResponse {
-			date:        today.clone(),
-			entry_count: 0,
-			summary:     format!("No journal entries for {} yet.", today),
+    if entry_count == 0 {
+        return (StatusCode::OK, Json(SummaryResponse {
+            date:        date.clone(),
+            entry_count: 0,
+            summary:     format!("No entries found for {} at {}.", date_display, jd_address),
+            metrics:     empty_metrics(),
             saved_to:    None,
         })).into_response();
     }
 
     tracing::info!(
-        date  = %today,
-        count = entry_count,
-        "generating daily summary"
+        date        = %date,
+        jd_address  = %jd_address,
+        entry_count = entry_count,
+        "generating summary"
     );
 
-    // ── Build context for LocalAI ─────────────────────────────────────────
-    let entries_text = entries
-        .iter()
-        .enumerate()
-        .map(|(i, e)| format!("Entry {}:\n{}", i + 1, e.trim()))
-        // enumerate() gives (index, value) pairs.
-        // We number each entry so the model can reference them.
-        .collect::<Vec<_>>()
-        .join("\n\n---\n\n");
-    // join with a markdown divider between entries.
-
-    let context = format!(
-        "These are journal entries written on {}. \
-         This is a personal journal in a system organised by Johnny Decimal. \
-         The journal (34.2) is part of 34_My-story which captures daily life, \
-         reflections, and experiences.",
-        today
-    );
-
-    // ── Call LocalAI ──────────────────────────────────────────────────────
     let ai = InferenceClient::new(&state.inference, &state.http_client);
 
-    let prompt = format!(
-        "Please write a concise daily summary of these journal entries. \
-         Capture the key themes, events, and any notable reflections. \
-         Write in second person (\"You...\") as if reflecting back to the author. \
-         Keep it to 2-3 paragraphs.\n\n{}",
-        entries_text
+    // ── Call 1: narrative summary ─────────────────────────────────────────
+    let context = format!(
+        "These are entries from {} written on {}. \
+         This is a personal knowledge system organised by Johnny Decimal.",
+        jd_address, date_display
     );
 
-    let summary_text = match ai.summarise(&prompt, &context).await {
+    let summary_prompt = req.prompt.unwrap_or_else(|| format!(
+        "Write a concise daily summary of these journal entries. \
+         Capture key themes, events, and notable reflections. \
+         Write in second person (\"You...\"). Keep to 2-3 paragraphs.\n\n{}",
+        entries
+    ));
+    // If caller provided a custom prompt, use it.
+    // Otherwise build the default. Note: we append entries to the
+    // default prompt but the caller's custom prompt must include
+    // the entries themselves if they want them summarised.
+
+    let summary_text = match ai.summarise(&summary_prompt, &context).await {
         Ok(s)  => s,
         Err(e) => {
-            tracing::error!(error = %e, "LocalAI summarisation failed");
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
+            tracing::error!(error = %e, "summarisation failed");
+            return (StatusCode::SERVICE_UNAVAILABLE,
                 Json(serde_json::json!({
-                    "error": "summarisation failed — is Island's LocalAI running?",
+                    "error":  "summarisation failed — is LocalAI running?",
                     "detail": e.to_string()
                 }))
             ).into_response();
         }
     };
 
-    // ── Save summary back to journal ──────────────────────────────────────
-    // The summary is itself a journal entry — pinned so it sorts to top.
-    // Filename includes _SUMMARY_ so we can skip it when reading entries.
-    let summary_filename = format!(
-        "{}T000000Z_INT_34.2_SUMMARY_.md",
-        today
-        // INT = Internal source (generated by Mailroom)
-        // T000000Z = midnight, so it sorts before other entries
+    // ── Call 2: metrics extraction ────────────────────────────────────────
+    let metrics_prompt = format!(
+        "Read these journal entries and extract metrics. \
+         Return ONLY valid JSON, no explanation, no markdown fences. \
+         Use null for any metric you cannot determine confidently.\n\
+         Required format:\n\
+         {{\
+           \"happiness\": <1-10 or null>,\
+           \"energy\": <1-10 or null>,\
+           \"focus\": <1-10 or null>,\
+           \"stress\": <1-10 or null>,\
+           \"sleep_quality\": <1-10 or null>,\
+           \"exercise\": <true/false or null>,\
+           \"themes\": [\"theme1\", \"theme2\"],\
+           \"milestones\": [\"achievement1\"],\
+           \"needs_review\": <true if uncertain>\
+         }}\n\n\
+         Journal entries:\n{}",
+        entries
     );
 
-    let summary_path = journal_dir.join(&summary_filename);
+    let metrics = match ai.summarise(&metrics_prompt, "Extract metrics as JSON only.").await {
+        Ok(raw) => parse_metrics(&raw),
+        Err(e)  => {
+            tracing::warn!(error = %e, "metrics extraction failed — using empty metrics");
+            empty_metrics()
+        }
+    };
 
-    let summary_content = format!(
-        "# Daily Summary — {}\n\n{}\n\n---\n*Generated by Mailroom at {}*\n",
-        today,
-        summary_text,
-        Utc::now().format("%Y-%m-%dT%H:%M:%SZ")
+    // ── Build daily document ──────────────────────────────────────────────
+    let daily_doc = format!(
+        "---\n\
+         date: {date_display}\n\
+         jd_address: {jd_address}\n\
+         happiness: {happiness}\n\
+         energy: {energy}\n\
+         focus: {focus}\n\
+         stress: {stress}\n\
+         sleep_quality: {sleep}\n\
+         exercise: {exercise}\n\
+         themes: [{themes}]\n\
+         milestones: [{milestones}]\n\
+         entry_count: {entry_count}\n\
+         needs_review: {needs_review}\n\
+         generated_at: {ts}\n\
+         ---\n\n\
+         # Daily Summary — {date_display}\n\n\
+         ## Summary\n\n\
+         {summary_text}\n\n\
+         ## Entries\n\n\
+         {entries}\n\n\
+         ## Metrics\n\n\
+         | Metric        | Score |\n\
+         |---------------|-------|\n\
+         | Happiness     | {happiness}/10 |\n\
+         | Energy        | {energy}/10 |\n\
+         | Focus         | {focus}/10 |\n\
+         | Stress        | {stress}/10 |\n\
+         | Sleep quality | {sleep}/10 |\n\
+         | Exercise      | {exercise} |\n\n\
+         **Themes:** {themes}\n\n\
+         **Milestones:** {milestones}\n\n\
+         ---\n\
+         *Generated by Mailroom · {entry_count} entries · {ts}*\n",
+        date_display  = date_display,
+        jd_address    = jd_address,
+        happiness     = opt_u8(&metrics.happiness),
+        energy        = opt_u8(&metrics.energy),
+        focus         = opt_u8(&metrics.focus),
+        stress        = opt_u8(&metrics.stress),
+        sleep         = opt_u8(&metrics.sleep_quality),
+        exercise      = opt_bool(&metrics.exercise),
+        themes        = metrics.themes.join(", "),
+        milestones    = metrics.milestones.join(", "),
+        entry_count   = entry_count,
+        needs_review  = metrics.needs_review,
+        summary_text  = summary_text,
+        entries       = entries,
+        ts            = Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
     );
 
-    let saved_to = match fs::write(&summary_path, &summary_content).await {
+    // ── Save to 34.4_Generated-summary/daily/ ────────────────────────────
+    // Summaries live in 34.4, not alongside raw entries in 34.2.
+    // This keeps generated content separate from raw input.
+    let summary_dir = state.library_root
+        .join("34_My-story")
+        .join("34.4_Generated-summary")
+        .join("daily");
+
+    let _ = fs::create_dir_all(&summary_dir).await;
+
+    let doc_filename = format!("{}_{}.md", date, jd_address.replace('.', "-"));
+    // e.g. "20260625_34-2.md" — date + JD address, dots replaced with dashes
+    // so the filename is safe on all filesystems.
+
+    let doc_path = summary_dir.join(&doc_filename);
+
+    let saved_to = match fs::write(&doc_path, &daily_doc).await {
         Ok(_) => {
-            tracing::info!(
-                file = %summary_path.display(),
-                "daily summary saved"
-            );
-            Some(summary_path.display().to_string())
+            tracing::info!(file = %doc_path.display(), "daily document saved");
+            Some(doc_path.display().to_string())
         }
         Err(e) => {
-            // Don't fail the response if saving fails —
-            // the summary text is still returned to the caller.
-            tracing::warn!(error = %e, "failed to save summary to disk");
+            tracing::warn!(error = %e, "failed to save daily document");
             None
         }
     };
 
     (StatusCode::OK, Json(SummaryResponse {
-        date: today,
+        date: date,
         entry_count,
         summary: summary_text,
+        metrics,
         saved_to,
     })).into_response()
+}
+
+// ── Private helpers ───────────────────────────────────────────────────────────
+
+/// Read all entries for a given JD address and date from disk.
+/// Returns (formatted entries text, count).
+async fn read_entries_for_date(
+    state:      &AppState,
+    jd_address: &str,
+    date:       &str,
+) -> anyhow::Result<(String, usize)> {
+    // Find the node path from the registry.
+    let node_path = state.registry
+        .get(jd_address)
+        .map(|m| m.effective_path())
+        .unwrap_or_else(|| jd_address.to_string());
+
+    let entries_dir = state.library_root
+        .join(&node_path)
+        .join("entries");
+
+    if !entries_dir.exists() {
+        return Ok((String::new(), 0));
+    }
+
+    let mut entries: Vec<(String, String)> = Vec::new();
+
+    let mut dir = fs::read_dir(&entries_dir).await?;
+
+    while let Ok(Some(entry)) = dir.next_entry().await {
+        let name = entry.file_name();
+        let name = name.to_string_lossy().to_string();
+
+        // Skip meta sidecars and previously generated summaries.
+        if name.ends_with(".meta.json") || name.contains("_SUMMARY_") {
+            continue;
+        }
+
+        if name.starts_with(date) {
+            // Extract time from filename for the transcript.
+            // Format: 20260625T024307Z_... → "02:43:07"
+            let time = if name.len() >= 15 {
+                let t = &name[9..15]; // "024307"
+                format!("{}:{}:{}", &t[..2], &t[2..4], &t[4..6])
+            } else {
+                "??:??:??".to_string()
+            };
+
+            match fs::read_to_string(entry.path()).await {
+                Ok(content) if !content.trim().is_empty() => {
+                    entries.push((time, content.trim().to_string()));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Sort chronologically by timestamp.
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let count = entries.len();
+    let text  = entries
+        .iter()
+        .map(|(time, content)| format!("[{}] {}", time, content))
+        .collect::<Vec<_>>()
+        .join("\n\n---\n\n");
+
+    Ok((text, count))
+}
+
+/// Returns an empty DailyMetrics with all fields None.
+fn empty_metrics() -> DailyMetrics {
+    DailyMetrics {
+        happiness:     None,
+        energy:        None,
+        focus:         None,
+        stress:        None,
+        sleep_quality: None,
+        exercise:      None,
+        themes:        vec![],
+        milestones:    vec![],
+        needs_review:  true,
+    }
+}
+
+/// Parse LocalAI's JSON response into DailyMetrics.
+/// Tolerant — if anything is missing or malformed, uses None.
+fn parse_metrics(raw: &str) -> DailyMetrics {
+    let cleaned = raw
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+
+    match serde_json::from_str::<serde_json::Value>(cleaned) {
+        Ok(v) => DailyMetrics {
+            happiness:     v["happiness"].as_u64().map(|n| n as u8),
+            energy:        v["energy"].as_u64().map(|n| n as u8),
+            focus:         v["focus"].as_u64().map(|n| n as u8),
+            stress:        v["stress"].as_u64().map(|n| n as u8),
+            sleep_quality: v["sleep_quality"].as_u64().map(|n| n as u8),
+            exercise:      v["exercise"].as_bool(),
+            themes:        v["themes"].as_array()
+                .map(|a| a.iter()
+                    .filter_map(|t| t.as_str().map(String::from))
+                    .collect())
+                .unwrap_or_default(),
+            milestones:    v["milestones"].as_array()
+                .map(|a| a.iter()
+                    .filter_map(|t| t.as_str().map(String::from))
+                    .collect())
+                .unwrap_or_default(),
+            needs_review:  v["needs_review"].as_bool().unwrap_or(true),
+        },
+        Err(e) => {
+            tracing::warn!(error = %e, raw = %raw, "failed to parse metrics JSON");
+            empty_metrics()
+        }
+    }
+}
+
+/// Format Option<u8> — "8" or "?"
+fn opt_u8(v: &Option<u8>) -> String {
+    v.map(|n| n.to_string()).unwrap_or_else(|| "?".to_string())
+}
+
+/// Format Option<bool> — "yes", "no", or "?"
+fn opt_bool(v: &Option<bool>) -> String {
+    match v {
+        Some(true)  => "yes".to_string(),
+        Some(false) => "no".to_string(),
+        None        => "?".to_string(),
+    }
 }

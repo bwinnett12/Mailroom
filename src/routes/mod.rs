@@ -34,7 +34,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/journal",         post(journal::write))
 
         // -- Sumarize Journal using LocalAI
-        .route("/journal/summary", get(journal::summary)) 
+        .route("/journal/summary", post(journal::summary))
 
         // ── Attach state ──────────────────────────────────────────────
         .with_state(state)
