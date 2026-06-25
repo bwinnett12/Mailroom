@@ -19,7 +19,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use chrono::{Local, Utc};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
@@ -131,7 +131,7 @@ pub struct SummaryResponse {
 pub async fn summary(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let today = Local::now().format("%Y%m%d").to_string();
+	let today = Utc::now().format("%Y%m%d").to_string();
     // Local::now() uses the server's local timezone — correct for a
     // personal journal. Utc::now() would give the wrong "day" if you're
     // in a timezone behind UTC.
