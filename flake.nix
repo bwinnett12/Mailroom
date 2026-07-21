@@ -1,4 +1,4 @@
-# flake.nix
+# Mailroom/flake.nix
 # 82_Mailroom — Axum routing server
 # Repository: github:bwinnett12/Mailroom
 #
