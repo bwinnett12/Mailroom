@@ -171,6 +171,19 @@ impl Registry {
 		}
 	}
 
+    /// Look up which JD address handles a given data type, by scanning
+    /// every node's [routing] table for a matching key. This is what makes
+    /// convenience endpoints (like /journal) location-agnostic — instead of
+    /// a hardcoded address, they ask "who currently accepts this data type?"
+    ///
+    /// Returns None if no node in the registry declares a route for it.
+    pub fn route_for(&self, data_type: &str) -> Option<String> {
+        self.entries
+            .values()
+            .filter_map(|m| m.routing.as_ref())
+            .find_map(|r| r.rules.get(data_type).cloned())
+    }
+
     /// Look up a JD address and return a reference to its Manifest.
     ///
     /// Returns None if the address isn't in the registry.

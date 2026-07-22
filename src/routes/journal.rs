@@ -49,26 +49,31 @@ pub async fn write(
     State(state): State<Arc<AppState>>,
     Json(body):   Json<JournalEntry>,
 ) -> impl IntoResponse {
+
+    let jd_address = state.registry
+        .route_for("text/journal")
+        .unwrap_or_else(|| "39.2-3C".to_string());
+
     let inbound = InboundEnvelope {
         source:     Source::Manual,
         data_type:  "text/journal".to_string(),
         payload:    Payload::Text(body.content),
-        jd_address: Some("34.2".to_string()),
+        jd_address: Some(jd_address.clone()),
         meta:       std::collections::HashMap::new(),
         created_at: body.created_at,
     };
 
     let envelope = inbound.into_envelope();
 
-    let manifest = match state.registry.get("34.2") {
+    let manifest = match state.registry.get(&jd_address) {
         Some(m) => m,
         None => {
-            tracing::error!("34.2_Journal not found in registry");
+            tracing::error!(jd_address = %jd_address, "journal destination not found in registry");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({
-                    "error": "journal node not found in registry",
-                    "hint":  "ensure 34.2_Journal has a .mailroom file in your vault"
+                    "error": "journal destination not found in registry",
+                    "hint":  format!("ensure {} has a .mailroom file in your vault", jd_address)
                 })),
             ).into_response();
         }
@@ -82,7 +87,7 @@ pub async fn write(
             (StatusCode::CREATED, Json(serde_json::json!({
                 "envelope_id": envelope.id.to_string(),
                 "file":        result.content_path.display().to_string(),
-                "jd_address":  "34.2",
+                "jd_address":  jd_address,
             }))).into_response()
         }
         Err(e) => {
@@ -188,7 +193,10 @@ pub async fn summary(
     );
     // "20260625" → "2026-06-25" for human-readable display
 
-    let jd_address = req.jd_address.unwrap_or_else(|| "34.2".to_string());
+    let jd_address = req.jd_address.unwrap_or_else(|| {
+        state.registry.route_for("text/journal")
+            .unwrap_or_else(|| "39.2-3C".to_string())
+    });
 
     // ── Get entries — from request or from disk ───────────────────────────
     let (entries, entry_count) = if let Some(notes) = req.notes {
