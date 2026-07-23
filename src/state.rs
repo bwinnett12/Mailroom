@@ -23,13 +23,13 @@ pub struct InferenceConfig {
     /// Model used for envelope classification.
     /// Task: "where does this data belong in the JD system?"
     /// Should be fast — this runs on every unaddressed envelope.
-    /// Example: "mistral-7b"
+    /// Example: "qwen_qwen3.5-0.8b"
     pub classify_model: String,
 
     /// Model used for summarisation.
     /// Task: "summarise this journal entry / health record / note"
     /// Can be the same as classify_model or larger.
-    /// Example: "mistral-7b"
+    /// Example: "qwen_qwen3.5-0.8b"
     pub summarise_model: String,
 
     /// Model used for chat completions via /v1/chat/completions.
@@ -49,13 +49,13 @@ impl InferenceConfig {
                 .unwrap_or_else(|_| "http://localhost:8090".to_string()),
 
             classify_model: std::env::var("MAILROOM_CLASSIFY_MODEL")
-                .unwrap_or_else(|_| "mistral-7b".to_string()),
+                .unwrap_or_else(|_| "qwen_qwen3.5-0.8b".to_string()),
 
             summarise_model: std::env::var("MAILROOM_SUMMARISE_MODEL")
-                .unwrap_or_else(|_| "mistral-7b".to_string()),
+                .unwrap_or_else(|_| "qwen_qwen3.5-0.8b".to_string()),
 
             chat_model: std::env::var("MAILROOM_CHAT_MODEL")
-                .unwrap_or_else(|_| "mistral-7b".to_string()),
+                .unwrap_or_else(|_| "qwen_qwen3.5-0.8b".to_string()),
         }
     }
 }
