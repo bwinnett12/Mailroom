@@ -75,10 +75,10 @@
             export MAILROOM_LISTEN="0.0.0.0:3000"
             export MAILROOM_VAULT="/tmp/test-vault"
             export MAILROOM_LIBRARY_ROOT="/tmp/test-library"
-            export MAILROOM_LLM_URL="http://island.tail4b1127.ts.net:8090"
-            export MAILROOM_CLASSIFY_MODEL="gpt-4"
-            export MAILROOM_SUMMARISE_MODEL="gpt-4"
-            export MAILROOM_CHAT_MODEL="gpt-4"
+            export MAILROOM_LLM_URL="http://ai.platatoo.com"
+            export MAILROOM_CLASSIFY_MODEL="qwen_qwen3.5-0.8b"
+            export MAILROOM_SUMMARISE_MODEL="qwen_qwen3.5-0.8b"
+            export MAILROOM_CHAT_MODEL="qwen_qwen3.5-0.8b"
             export RUST_LOG="mailroom=debug,tower_http=info"
             # debug = verbose, shows every routing decision
             # Change to "mailroom=info" for quieter output
@@ -189,17 +189,17 @@
 
         llmUrl = lib.mkOption {
           type        = lib.types.str;
-          default     = "http://localhost:8090";
+          default     = "http://ai.platatoo.com";
           description = ''
             Base URL of the LocalAI instance.
             For Island over Tailscale:
-              http://island.tail4b1127.ts.net:8090
+              http://ai.platatoo.com
           '';
         };
 
         classifyModel = lib.mkOption {
           type        = lib.types.str;
-          default     = "gpt-4";
+          default     = "qwen_qwen3.5-0.8b";
           description = ''
             Model used for envelope classification.
             Should be fast — runs on every unaddressed envelope.
@@ -208,13 +208,13 @@
 
         summariseModel = lib.mkOption {
           type        = lib.types.str;
-          default     = "gpt-4";
+          default     = "qwen_qwen3.5-0.8b";
           description = "Model used for content summarisation.";
         };
 
         chatModel = lib.mkOption {
           type        = lib.types.str;
-          default     = "gpt-4";
+          default     = "qwen_qwen3.5-0.8b";
           description = ''
             Model used for chat completions via /v1/chat/completions.
             JD routing may override this per-request.
