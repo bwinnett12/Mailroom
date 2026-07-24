@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>New Entry</h1>
+<form hx-post="/submit" hx-target="#result" hx-swap="innerHTML">
+  <textarea name="content" rows="6" style="width:100%" placeholder="What's on your mind?"></textarea>
+  <select name="jd_address">
+    {% for (id, name) in routes %}
+    <option value="{{ id }}">{{ name }} ({{ id }})</option>
+    {% endfor %}
+  </select>
+  <button type="submit">Send</button>
+</form>
+<div id="result"></div>
+{% endblock %}

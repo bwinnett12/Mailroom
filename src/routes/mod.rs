@@ -12,6 +12,7 @@ pub mod envelope;
 // Rust will look for src/routes/envelope.rs
 pub mod entries;
 pub mod journal;
+pub mod web;
 
 use std::sync::Arc;
 use axum::{routing::{get, post}, Router};
@@ -36,7 +37,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         // -- Sumarize Journal using LocalAI
         .route("/journal/summary", post(journal::summary))
 
-        // ── Attach state ──────────────────────────────────────────────
+        .route("/", get(web::new_envelope_form))
+        .route("/submit", post(web::submit))
+
+                // ── Attach state ──────────────────────────────────────────────
         .with_state(state)
         // .with_state() makes Arc<AppState> available to any handler
         // that declares State(s): State<Arc<AppState>> as an argument.
