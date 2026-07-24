@@ -51,8 +51,8 @@
           # reqwest uses openssl for HTTPS to LocalAI
         ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
           pkgs.libiconv
-          pkgs.darwin.apple_sdk.frameworks.Security
-          pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
+          pkgs.libiconv
+          pkgs.apple-sdk_11
           # macOS requires these frameworks for TLS.
           # Harmless on Linux — optionals means they're skipped there.
         ];
