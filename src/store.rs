@@ -10,6 +10,7 @@
 // The meta file holds everything else — id, source, data_type, tags.
 // Together they are a self-describing, database-free archive entry.
 
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -103,8 +104,8 @@ fn format_timestamp(dt: DateTime<Utc>) -> String {
 /// The sidecar metadata file written alongside every content file.
 /// This is what PostgreSQL will eventually read to build its index.
 /// Until then, it makes the archive self-describing.
-#[derive(Debug, Serialize, Deserialize)]
 // Add Deserialize — we now read these back from disk in the list handler
+#[derive(Debug, Serialize, Deserialize)]
 pub struct EntryMeta {
     pub envelope_id:  String,
     pub jd_address:   Option<String>,
@@ -115,21 +116,20 @@ pub struct EntryMeta {
     pub meta:         std::collections::HashMap<String, String>,
     pub content_file: String,
 
-    // ── New fields ────────────────────────────────────────────────
     #[serde(default)]
     pub pinned: bool,
-    // Pinned entries always sort to the top.
-    // Set by the Mailroom for overview/index entries.
-    // Example: a node's overview.md is always pinned.
 
     #[serde(default)]
     pub starred: bool,
-    // Starred entries are user-marked as important.
-    // Set by the user via the front-end or a future PATCH endpoint.
-    // Sorts above normal entries but below pinned.
+
+    #[serde(default)]
+    pub content_hash: Option<String>,
 }
+
 impl EntryMeta {
-    fn from_envelope(envelope: &Envelope, content_filename: &str) -> Self {
+    fn from_envelope(envelope: &Envelope, 
+                     content_filename: &str,
+                    content_hash: Option<String>) -> Self {
         Self {
             envelope_id:  envelope.id.to_string(),
             jd_address:   envelope.jd_address.clone(),
@@ -141,6 +141,8 @@ impl EntryMeta {
             content_file: content_filename.to_string(),
             pinned:       false,
             starred:      false,
+
+            content_hash 
         }
     }
 }
@@ -196,9 +198,10 @@ pub async fn store(
 
     // ── Write content file ────────────────────────────────────────────────────
     write_payload(&envelope.payload, &content_path).await?;
+    let content_hash = compute_content_hash(&envelope.payload).await?;
 
     // ── Write meta sidecar ────────────────────────────────────────────────────
-    let meta    = EntryMeta::from_envelope(envelope, &content_filename);
+    let meta = EntryMeta::from_envelope(envelope, &content_filename, content_hash);
     let meta_json = serde_json::to_string_pretty(&meta)?;
     // to_string_pretty formats JSON with indentation — readable on disk.
     // to_string (without pretty) is more compact — we prefer readable here.
@@ -214,6 +217,35 @@ pub async fn store(
     );
 
     Ok(WriteResult { content_path, meta_path })
+}
+
+
+/// Sha256 of a payload's actual content. None for payloads with nothing
+/// local to hash (Url). For FilePath, hashes the *referenced file's*
+/// bytes, not the .ref pointer text — that's what actually lets Mailroom
+/// detect duplicate copies of the same file across different locations.
+async fn compute_content_hash(payload: &Payload) -> anyhow::Result<Option<String>> {
+    let mut hasher = Sha256::new();
+
+    match payload {
+        Payload::Text(text)  => hasher.update(text.as_bytes()),
+        Payload::Json(value) => hasher.update(&serde_json::to_vec(value)?),
+        Payload::Bytes(bytes) => hasher.update(bytes),
+        Payload::FilePath(src_path) => {
+            // Stream in chunks rather than loading fully into memory —
+            // matters once this covers large content (Books/Movies).
+            use tokio::io::AsyncReadExt;
+            let mut file = fs::File::open(src_path).await?;
+            let mut buf = [0u8; 8192];
+            loop {
+                let n = file.read(&mut buf).await?;
+                if n == 0 { break; }
+                hasher.update(&buf[..n]);
+            }
+        }
+        Payload::Url(_) => return Ok(None),
+    }
+    Ok(Some(hex::encode(hasher.finalize())))
 }
 
 // ── Payload writer ────────────────────────────────────────────────────────────
