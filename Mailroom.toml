@@ -1,19 +1,88 @@
 bind_addr = "0.0.0.0:3000"
 jd_root   = "./jd"
 
-# --- Agents ---
+# --- Tasks ---
+# Each [[tasks]] entry is one "situation" the model layer can be attuned to.
+# InferenceClient::run(name, payload, context) looks a task up by `name`,
+# so a model chain (e.g. lint -> sanitize -> classify) is just calling run()
+# once per row below, in whatever order you want, feeding one output into
+# the next call's input/context. Swapping backends (LocalAI -> Ollama ->
+# llama.cpp directly, or adding a whisper.cpp server) is only ever a change
+# to base_url/model here, never to inference.rs.
 
-[[agents]]
-name     = "local-llama"
-base_url = "http://localhost:11434"   # Ollama default
-accepts  = ["text", "camera", "file"]
-jd_prefix = "10"                      # JD area 10: AI / Language
+[[tasks]]
+name          = "classify"
+base_url      = "http://localhost:8090"   # LocalAI on Island
+model         = "qwen_qwen3.5-0.8b"
+temperature   = 0.1
+kind          = "chat"
+max_input_chars = 500
+system_prompt = """
+You are a routing assistant for a personal knowledge system organised by \
+Johnny Decimal addresses. Given a piece of data, return only the most \
+appropriate JD address (e.g. '34.2'). No explanation. No punctuation. \
+Just the address.
+"""
 
-[[agents]]
-name     = "local-llava"
-base_url = "http://localhost:11434"
-accepts  = ["camera", "video"]
-jd_prefix = "11"                      # JD area 11: Vision
+[[tasks]]
+name          = "summarise"
+base_url      = "http://localhost:8090"
+model         = "qwen_qwen3.5-0.8b"
+temperature   = 0.3
+kind          = "chat"
+system_prompt = """
+You are a summarisation assistant for a personal knowledge system. \
+Summarise the following content concisely. Context about where this will \
+be stored: {context}
+"""
+
+[[tasks]]
+name          = "chat"
+base_url      = "http://localhost:8090"
+model         = "qwen_qwen3.5-0.8b"
+temperature   = 0.7
+kind          = "chat"
+system_prompt = """
+You are a helpful assistant integrated into a personal knowledge system \
+organised by Johnny Decimal addresses. {context}
+"""
+
+[[tasks]]
+name          = "transcribe"
+base_url      = "http://localhost:8091"   # whisper.cpp server, separate from LocalAI
+model         = "whisper-base-en"
+kind          = "audio"
+system_prompt = "{context}"               # used as Whisper's vocabulary/style hint
+
+# Example of a future chain step — not wired into any route yet, but this
+# is all it takes to add one: a name, a backend, and a prompt.
+# [[tasks]]
+# name          = "lint"
+# base_url      = "http://localhost:11434"
+# model         = "codellama"
+# temperature   = 0.0
+# kind          = "chat"
+# system_prompt = """
+# Check the following content for internal consistency and formatting \
+# problems only. Report problems as a short bullet list, or the single \
+# word OK if none. Do not rewrite the content. Context: {context}
+# """
+
+# --- Agents (legacy — not currently wired into any Rust code) ---
+# Left here for reference while migrating; the [[tasks]] table above is
+# the real, loaded config as of this change.
+
+# [[agents]]
+# name     = "local-llama"
+# base_url = "http://localhost:11434"   # Ollama default
+# accepts  = ["text", "camera", "file"]
+# jd_prefix = "10"                      # JD area 10: AI / Language
+
+# [[agents]]
+# name     = "local-llava"
+# base_url = "http://localhost:11434"
+# accepts  = ["camera", "video"]
+# jd_prefix = "11"                      # JD area 11: Vision
 
 # [[agents]]
 # name     = "n8n-webhook"

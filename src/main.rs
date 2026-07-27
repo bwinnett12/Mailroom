@@ -3,6 +3,7 @@
 mod envelope;
 mod inference;
 mod manifest;
+mod orchard;
 mod registry;
 mod routes;
 mod state;
@@ -23,21 +24,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = std::env::var("MAILROOM_LISTEN")
         .unwrap_or_else(|_| "0.0.0.0:3000".to_string());
 
-    let inference = InferenceConfig::from_env();
+    let inference_config_path = std::env::var("MAILROOM_CONFIG")
+        .unwrap_or_else(|_| "./Mailroom.toml".to_string());
+    let inference_config_path = PathBuf::from(inference_config_path);
+
+    let inference = if inference_config_path.exists() {
+        match InferenceConfig::load(&inference_config_path) {
+            Ok(cfg) if !cfg.tasks.is_empty() => {
+                tracing::info!(
+                    path = %inference_config_path.display(),
+                    tasks = ?cfg.tasks.keys().collect::<Vec<_>>(),
+                    "loaded task config"
+                );
+                cfg
+            }
+            Ok(_) => {
+                tracing::warn!(
+                    path = %inference_config_path.display(),
+                    "config file has no [[tasks]] entries — falling back to env defaults"
+                );
+                InferenceConfig::from_env_defaults()
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = %inference_config_path.display(),
+                    error = %e,
+                    "failed to parse task config — falling back to env defaults"
+                );
+                InferenceConfig::from_env_defaults()
+            }
+        }
+    } else {
+        tracing::info!("no Mailroom.toml found — using env-var task defaults");
+        InferenceConfig::from_env_defaults()
+    };
 
     let library_root = std::env::var("MAILROOM_LIBRARY_ROOT")
         .unwrap_or_else(|_| {
             // Default: a Library/ directory next to the vault
             format!("{}/Library", vault_root)
         });
-
-    tracing::info!(
-        classify_model  = %inference.classify_model,
-        summarise_model = %inference.summarise_model,
-        chat_model      = %inference.chat_model,
-        llm_url         = %inference.base_url,
-        "inference config loaded"
-    );
 
     let vault_path = PathBuf::from(&vault_root);
 

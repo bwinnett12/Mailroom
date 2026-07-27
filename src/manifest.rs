@@ -13,7 +13,7 @@
 //   serde returns an error. If a field is missing and marked
 //   Option<T>, serde fills it with None instead of erroring.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 // We only need Deserialize here — we're reading .mailroom files,
 // not writing them (except for [about], which we'll handle separately).
 
@@ -22,7 +22,7 @@ use serde::Deserialize;
 // Each nested section (like [routing], [library]) becomes a field
 // whose type is its own struct.
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Manifest {
     // ── Identity ──────────────────────────────────────────────────────────
     pub id:   String,
