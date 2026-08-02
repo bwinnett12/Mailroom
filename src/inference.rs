@@ -1,52 +1,49 @@
 // src/inference.rs
 //
-// The inference module handles all communication with LocalAI.
-// It has three jobs:
-//   classify()   — given an envelope, return a JD address
-//   summarise()  — given text content, return a summary string
-//   chat()       — forward a chat request, return the response
+// The inference module handles all communication with model backends.
 //
-// All three speak the OpenAI-compatible API that LocalAI exposes.
-// The only difference between them is which model they use and
-// what system prompt they send.
+// The core of it is one function: `run()`. It takes a task name (a row in
+// the InferenceConfig table — "classify", "summarise", "chat", "transcribe",
+// or anything else you add to Mailroom.toml), a Payload to act on, and a
+// context string. It looks up that task's backend/model/prompt, sends the
+// request, and returns the model's output as a String.
+//
+// Everything else in this file — classify(), summarise(), transcribe() —
+// is a thin convenience wrapper around run(), kept around so existing
+// call sites in routes/ don't need to change shape. A model *chain*
+// (lint the input, then sanitize it, then classify the result) is just
+// calling run() several times, feeding each output back in as the next
+// call's input/context — there's no separate "chain" API, because you
+// don't need one.
 
 use serde::{Deserialize, Serialize};
-use crate::state::InferenceConfig;
-use crate::envelope::Envelope;
+use crate::machines;
 
-// ── OpenAI-compatible request/response types ──────────────────────────────────
-// LocalAI speaks the OpenAI wire format. These structs represent
-// the JSON that goes over the wire.
+use crate::envelope::{Envelope, Payload};
+use crate::state::{InferenceConfig, TaskConfig, TaskKind};
+
+// ── OpenAI-compatible chat request/response types ─────────────────────────────
+// Used for every Chat-kind task (classify, summarise, chat, and any new
+// chain step you add — lint, sanitize, compartmentalize, ...).
 
 #[derive(Debug, Serialize)]
-// Only Serialize — we send this, we never receive it.
 struct ChatRequest {
-    model:    String,
+    model: String,
     messages: Vec<Message>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    // skip_serializing_if: don't include this field in JSON if it's None.
-    // Keeps the request clean — LocalAI uses its default if absent.
     temperature: Option<f32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct Message {
-    role:    String,
-    // OpenAI roles: "system", "user", "assistant"
-    // "system" sets the AI's behaviour for the conversation.
-    // "user" is the human turn.
-    // "assistant" is the AI's previous responses (for multi-turn).
-
+    role: String,
     content: String,
 }
 
 #[derive(Debug, Deserialize)]
-// Only Deserialize — we receive this, we never send it.
 struct ChatResponse {
     choices: Vec<Choice>,
-    // LocalAI can return multiple completions (choices).
-    // We always ask for one and take choices[0].
 }
 
 #[derive(Debug, Deserialize)]
@@ -54,181 +51,224 @@ struct Choice {
     message: Message,
 }
 
+// ── OpenAI-compatible audio transcription response ────────────────────────────
+// Whisper.cpp's server and faster-whisper's server both return this shape
+// from POST /v1/audio/transcriptions.
+
+#[derive(Debug, Deserialize)]
+struct TranscriptionResponse {
+    text: String,
+}
+
 // ── InferenceClient ───────────────────────────────────────────────────────────
-// Wraps the reqwest::Client and InferenceConfig together.
-// Handlers construct one of these when they need to call LocalAI.
 
 pub struct InferenceClient<'a> {
-    // Rust concept — lifetimes:
-    // The `'a` lifetime parameter says: "this struct borrows data that
-    // must live at least as long as 'a". Here we borrow InferenceConfig
-    // and reqwest::Client from AppState rather than cloning them.
-    // The compiler ensures InferenceClient can't outlive AppState.
     config: &'a InferenceConfig,
     client: &'a reqwest::Client,
 }
 
 impl<'a> InferenceClient<'a> {
-    /// Construct from references to AppState's fields.
-    /// Called inside a handler:
-    ///   let ai = InferenceClient::new(&state.inference, &state.http_client);
     pub fn new(config: &'a InferenceConfig, client: &'a reqwest::Client) -> Self {
         Self { config, client }
     }
 
-    /// Ask LocalAI which JD address this envelope belongs to.
-    /// Returns a JD address string like "34.2" or "35.3".
-    /// Called when envelope.jd_address is None.
-    pub async fn classify(&self, envelope: &Envelope) -> anyhow::Result<String> {
-        let system_prompt = format!(
-            // format! works like println! but returns a String instead of printing.
-            // {{}} inside format strings is a literal brace — not a placeholder.
-            "You are a routing assistant for a personal knowledge system \
-             organised by Johnny Decimal addresses. Given a piece of data, \
-             return only the most appropriate JD address (e.g. '34.2'). \
-             No explanation. No punctuation. Just the address."
-        );
+    // ── The one function ──────────────────────────────────────────────────
+    //
+    /// Run a named task against a Payload, with a context string substituted
+    /// into the task's system prompt (or, for Audio tasks, used as Whisper's
+    /// vocabulary hint). Every other method on this struct calls through
+    /// here — this is the only place that actually knows how to reach a
+    /// model backend.
+    ///
+    /// task_name must match a `name` in Mailroom.toml's [[tasks]] table
+    /// (or one of the four built-in defaults if no Mailroom.toml is
+    /// present — see InferenceConfig::from_env_defaults).
+    pub async fn run(
+        &self,
+        task_name: &str,
+        input: &Payload,
+        context: &str,
+    ) -> anyhow::Result<String> {
+        let task = self.config.tasks.get(task_name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "no task named '{task_name}' configured — check Mailroom.toml's [[tasks]]"
+            )
+        })?;
 
-        let user_prompt = format!(
+        match task.kind {
+            TaskKind::Chat => self.run_chat(task, input, context).await,
+            TaskKind::Audio => self.run_audio(task, input, context).await,
+        }
+    }
+
+    async fn run_chat(
+        &self,
+        task: &TaskConfig,
+        input: &Payload,
+        context: &str,
+    ) -> anyhow::Result<String> {
+        let system_prompt = task.system_prompt.replace("{context}", context);
+        let user_content = Self::payload_as_text(input, task.max_input_chars);
+
+        let request = ChatRequest {
+            model: task.model.clone(),
+            messages: vec![
+                Message {
+                    role: "system".to_string(),
+                    content: system_prompt,
+                },
+                Message {
+                    role: "user".to_string(),
+                    content: user_content,
+                },
+            ],
+            temperature: task.temperature,
+        };
+
+        let url = format!("{}/v1/chat/completions", task.base_url);
+
+        let resp = self
+            .client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await?
+            .json::<ChatResponse>()
+            .await?;
+
+        Ok(resp
+            .choices
+            .into_iter()
+            .next()
+            .map(|c| c.message.content)
+            .unwrap_or_default()
+            .trim()
+            .to_string())
+    }
+
+    async fn run_audio(
+        &self,
+        task: &TaskConfig,
+        input: &Payload,
+        context: &str,
+    ) -> anyhow::Result<String> {
+        // Audio tasks only make sense against Bytes or FilePath payloads —
+        // anything else is a config/call-site mistake, so bail loudly
+        // rather than silently transcribing an empty clip.
+        let bytes = match input {
+            Payload::Bytes(b) => b.clone(),
+            Payload::FilePath(p) => std::fs::read(p)?,
+            other => anyhow::bail!(
+                "transcribe task requires a Bytes or FilePath payload, got {other:?}"
+            ),
+        };
+
+        let hint = task.system_prompt.replace("{context}", context);
+
+        let part = reqwest::multipart::Part::bytes(bytes).file_name("audio.wav");
+        let mut form = reqwest::multipart::Form::new()
+            .part("file", part)
+            .text("model", task.model.clone());
+
+        if !hint.trim().is_empty() {
+            // Whisper's "prompt" field biases vocabulary/spelling —
+            // e.g. hand it JD terms or proper nouns likely to come up.
+            form = form.text("prompt", hint);
+        }
+
+        let url = format!("{}/v1/audio/transcriptions", task.base_url);
+
+        let resp = self
+            .client
+            .post(&url)
+            .multipart(form)
+            .send()
+            .await?
+            .json::<TranscriptionResponse>()
+            .await?;
+
+        Ok(resp.text.trim().to_string())
+    }
+
+    // ── Convenience wrappers ──────────────────────────────────────────────
+    // These exist so routes/*.rs doesn't need to change. Each is a one-line
+    // call into run() with the payload shaped the way that task expects.
+
+    /// Ask the model which JD address this envelope belongs to.
+    pub async fn classify(&self, envelope: &Envelope) -> anyhow::Result<String> {
+        let combined = format!(
             "Data type: {}\nSource: {:?}\nContent preview: {}",
             envelope.data_type,
             envelope.source,
-            // {:?} uses the Debug format — works on any type with #[derive(Debug)]
-            self.payload_preview(envelope),
+            Self::payload_as_text(&envelope.payload, Some(500)),
         );
 
-        let response = self.call(
-            &self.config.classify_model,
-            &system_prompt,
-            &user_prompt,
-            Some(0.1),
-            // Low temperature = more deterministic output.
-            // For classification we want consistent, focused answers.
-        ).await?;
-
-        // Trim whitespace — model responses sometimes have trailing newlines.
-        Ok(response.trim().to_string())
+        self.run("classify", &Payload::Text(combined), "").await
     }
 
     /// Summarise text content into a single short paragraph.
-    /// Used when a node's .mailroom has ai_classify = true,
-    /// or when the front-end requests a summary.
-    pub async fn summarise(
-        &self,
-        content:  &str,
-        context:  &str,
-        // context is the .about file for the destination JD node —
-        // tells the model what this area is for.
-    ) -> anyhow::Result<String> {
-        let system_prompt = format!(
-            "You are a summarisation assistant for a personal knowledge system. \
-             Summarise the following content concisely. \
-             Context about where this will be stored: {context}"
-        );
-
-        let response = self.call(
-            &self.config.summarise_model,
-            &system_prompt,
-            content,
-            Some(0.3),
-        ).await?;
-
-        Ok(response.trim().to_string())
+    pub async fn summarise(&self, content: &str, context: &str) -> anyhow::Result<String> {
+        self.run("summarise", &Payload::Text(content.to_string()), context)
+            .await
     }
 
-    /// Forward a chat message to LocalAI and return the response text.
-    /// Used by the /v1/chat/completions route.
-    /// `messages` is the full conversation history from the request.
-    /// `model_override` lets the JD router select a specific model.
+    /// Transcribe an audio payload (Bytes or FilePath). `context` is passed
+    /// through as Whisper's vocabulary hint — e.g. JD terms or names that
+    /// are likely to show up and easy for a small model to mis-hear.
+    pub async fn transcribe(&self, audio: &Payload, context: &str) -> anyhow::Result<String> {
+        self.run("transcribe", audio, context).await
+    }
+
+    /// Forward a full multi-turn chat message to the model, return its
+    /// response text. Kept separate from run() rather than folded in —
+    /// conversation history doesn't fit the single-input/single-context
+    /// shape the rest of this file uses, and forcing it to would just
+    /// make both harder to read.
     pub async fn chat(
         &self,
-        messages:       Vec<(String, String)>,
-        // Vec of (role, content) pairs — the conversation so far.
+        messages: Vec<(String, String)>,
         model_override: Option<&str>,
-        // If the JD routing table selected a specific model, use it.
-        // Otherwise fall back to self.config.chat_model.
     ) -> anyhow::Result<String> {
+        let task = self.config.tasks.get("chat");
+
         let model = model_override
-            .unwrap_or(&self.config.chat_model)
-            .to_string();
-        // Option::unwrap_or returns the inner value if Some,
-        // or the provided default if None.
+            .map(|m| m.to_string())
+            .or_else(|| task.map(|t| t.model.clone()))
+            .unwrap_or_else(|| "qwen_qwen3.5-0.8b".to_string());
+
+        let base_url = task
+            .map(|t| t.base_url.clone())
+            .unwrap_or_else(|| "http://localhost:8090".to_string());
+
+        let system = task
+            .map(|t| t.system_prompt.clone())
+            .unwrap_or_else(|| {
+                "You are a helpful assistant integrated into a personal knowledge system \
+                 organised by Johnny Decimal addresses."
+                    .to_string()
+            });
 
         let msgs: Vec<Message> = messages
             .into_iter()
-            // into_iter() consumes the Vec, giving us owned values.
-            // (vs iter() which gives references)
             .map(|(role, content)| Message { role, content })
-            // map transforms each (role, content) tuple into a Message struct.
             .collect();
 
-        let system = "You are a helpful assistant integrated into a personal \
-                      knowledge system organised by Johnny Decimal addresses.";
-
         let mut all_messages = vec![Message {
-            role:    "system".to_string(),
-            content: system.to_string(),
+            role: "system".to_string(),
+            content: system,
         }];
         all_messages.extend(msgs);
-        // extend appends all items from an iterator onto a Vec.
 
         let request = ChatRequest {
             model,
-            messages:    all_messages,
-            temperature: Some(0.7),
+            messages: all_messages,
+            temperature: task.and_then(|t| t.temperature).or(Some(0.7)),
         };
 
-        let url = format!("{}/v1/chat/completions", self.config.base_url);
+        let url = format!("{}/v1/chat/completions", base_url);
 
-        let resp = self.client
-            .post(&url)
-            .json(&request)
-            // .json() serializes our ChatRequest to JSON and sets
-            // Content-Type: application/json automatically.
-            .send()
-            .await?
-            .json::<ChatResponse>()
-            // .json::<ChatResponse>() deserializes the response body
-            // into our ChatResponse struct.
-            // The ::<ChatResponse> is a "turbofish" — it tells Rust
-            // which type to deserialize into when it can't infer it.
-            .await?;
-
-        let content = resp.choices
-            .into_iter()
-            .next()
-            // .next() takes the first item from the iterator — Option<Choice>.
-            .map(|c| c.message.content)
-            // .map extracts the content string if Some.
-            .unwrap_or_default();
-            // unwrap_or_default() returns String::default() (empty string)
-            // if there were no choices. Better than panicking.
-
-        Ok(content)
-    }
-
-    // ── Private helper ────────────────────────────────────────────────────────
-
-    /// Core HTTP call to LocalAI. All three public methods go through here.
-    async fn call(
-        &self,
-        model:       &str,
-        system:      &str,
-        user:        &str,
-        temperature: Option<f32>,
-    ) -> anyhow::Result<String> {
-        let request = ChatRequest {
-            model: model.to_string(),
-            messages: vec![
-                Message { role: "system".to_string(), content: system.to_string() },
-                Message { role: "user".to_string(),   content: user.to_string()   },
-            ],
-            temperature,
-        };
-
-        let url = format!("{}/v1/chat/completions", self.config.base_url);
-
-        let resp = self.client
+        let resp = self
+            .client
             .post(&url)
             .json(&request)
             .send()
@@ -236,27 +276,34 @@ impl<'a> InferenceClient<'a> {
             .json::<ChatResponse>()
             .await?;
 
-        Ok(resp.choices
+        // machines::resolve_available(&registry, &priority_list, port, "/health").await;
+
+        Ok(resp
+            .choices
             .into_iter()
             .next()
             .map(|c| c.message.content)
             .unwrap_or_default())
+    
     }
 
-    /// Extract a short preview of the envelope's payload for classification.
-    /// We don't send the full payload — just enough for the model to classify.
-    fn payload_preview(&self, envelope: &Envelope) -> String {
-        use crate::envelope::Payload;
-        match &envelope.payload {
-            Payload::Text(s) => s.chars().take(500).collect(),
-            // .chars() iterates over Unicode characters (not bytes).
-            // .take(500) limits to 500 characters.
-            // .collect() gathers them back into a String.
+    // ── Private helper ────────────────────────────────────────────────────
 
-            Payload::Json(v) => v.to_string().chars().take(500).collect(),
-            Payload::Url(u)  => u.clone(),
+    /// Turn a Payload into text suitable for a chat "user" message.
+    /// `max_chars`, if set, truncates — cheap tasks like classify only
+    /// need a preview; leave it None for tasks that want the full text.
+    fn payload_as_text(payload: &Payload, max_chars: Option<usize>) -> String {
+        let full = match payload {
+            Payload::Text(s) => s.clone(),
+            Payload::Json(v) => v.to_string(),
+            Payload::Url(u) => u.clone(),
             Payload::FilePath(p) => format!("file: {}", p.display()),
-            Payload::Bytes(_)    => "[binary data]".to_string(),
+            Payload::Bytes(_) => "[binary data]".to_string(),
+        };
+
+        match max_chars {
+            Some(n) => full.chars().take(n).collect(),
+            None => full,
         }
     }
 }

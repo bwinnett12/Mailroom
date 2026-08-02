@@ -74,21 +74,6 @@ pub struct Manifest {
     #[serde(default)]
     pub about: Option<AboutBlock>,
     // AI-maintained summary block. None until first `mailroom refresh`.
-
-    #[serde(default)]
-    pub known_tags: Vec<String>,
-    // Documents which tags this Nest's content typically carries —
-    // e.g. ["vegetarian", "gluten-free"] for a recipe Nest, or
-    // ["genre:horror", "rewatch"] for a movies Nest. Purely descriptive
-    // today, same as `accepts` isn't strictly enforced against incoming
-    // envelopes — a future `strict_tags` flag in MailroomConfig could
-    // opt a Nest into validating against this list, but nothing does yet.
-    // Tags themselves stay a flat, unconstrained Vec<String> on the
-    // Envelope/EntryMeta — this field only documents which ones a given
-    // Nest considers meaningful, per its own internal jurisdiction.
-
-    #[serde(default)]
-    pub call_number: Option<String>,
 }
 impl Manifest {
     /// Returns the effective path for this node within /storage/Library.
@@ -187,23 +172,6 @@ pub struct MailroomConfig {
     #[serde(default)]
     pub ai_classify: bool,
     // true = ask AI to confirm routing before storing.
-
-    #[serde(default)]
-    pub mints_subnests: bool,
-    // true = this Nest is a Rookery. Envelopes addressed here don't get
-    // stored directly — instead the attendant module mints a brand new
-    // child Nest beneath this one (its own directory + `nest` file,
-    // dynamically addressed) and stores the envelope there. Used for
-    // domains where individual items (books, papers) each deserve their
-    // own JD address, but there are far too many of them to pre-declare
-    // in the master index. See src/attendant.rs.
-
-    #[serde(default)]
-    pub child_addressing: Option<String>,
-    // Which strategy the attendant uses to mint a child's id when
-    // `mints_subnests` is true. Only "content_hash" exists today —
-    // room for "sequential" or "loc_call_number" later without a
-    // schema change. None is treated the same as "content_hash".
 }
 
 fn default_true() -> bool {

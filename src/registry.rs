@@ -1,11 +1,11 @@
 // src/registry.rs
 //
 // The Registry is built once at startup by walking the vault directory tree.
-// It finds every .mailroom file, parses it into a Manifest, and stores
+// It finds every nest file, parses it into a Manifest, and stores
 // everything in a HashMap keyed by JD address.
 //
 // After startup, the Registry is read-only — handlers query it but never
-// modify it. Modifications happen by editing .mailroom files and restarting,
+// modify it. Modifications happen by editing nest files and restarting,
 // or later via a `mailroom refresh` command.
 
 use std::{
@@ -23,7 +23,7 @@ use std::{
 
 use walkdir::WalkDir;
 // WalkDir produces an iterator over every file and directory
-// under a given root, recursively. We'll filter for .mailroom files.
+// under a given root, recursively. We'll filter for nest files.
 
 use crate::manifest::Manifest;
 // Bring our Manifest type into scope from the manifest module.
@@ -38,20 +38,20 @@ pub struct Registry {
     /// e.g. "35.2" → Manifest { id: "35.2", name: "Physical", ... }
     entries: HashMap<String, Manifest>,
 
-    /// How many .mailroom files were found during the last load.
+    /// How many nest files were found during the last load.
     /// Useful for logging and health checks.
     pub node_count: usize,
 }
 
 impl Registry {
-    /// Walk the vault and build a Registry from all .mailroom files found.
+    /// Walk the vault and build a Registry from all nest files found.
     ///
     /// This is called once at startup. It's synchronous — we block on
     /// filesystem I/O during startup rather than making this async,
     /// because the server shouldn't accept requests until the registry
     /// is ready. Startup blocking is acceptable; request blocking is not.
     ///
-    /// Returns an error if the vault root doesn't exist or a .mailroom
+    /// Returns an error if the vault root doesn't exist or a nest
     /// file contains invalid TOML.
     pub fn load(vault_root: &Path) -> anyhow::Result<Self> {
         // anyhow::Result<T> is shorthand for Result<T, anyhow::Error>.
@@ -92,8 +92,8 @@ impl Registry {
             // entry.path() returns a &Path — a borrowed reference to the path.
             // We don't need to own it here, just inspect it.
 
-            // Check if this entry is a file named exactly ".mailroom"
-            if path.file_name().and_then(|n| n.to_str()) == Some(".mailroom") {
+            // Check if this entry is a file named exactly "nest"
+            if path.file_name().and_then(|n| n.to_str()) == Some("nest") {
                 // path.file_name() returns the last component of the path
                 // as an Option<&OsStr>. It's an Option because the path
                 // might end in ".." or be empty.
@@ -103,7 +103,7 @@ impl Registry {
                 // .and_then chains operations on Option — if any step
                 // returns None, the whole expression is None.
                 //
-                // == Some(".mailroom") compares to the expected filename.
+                // == Some("nest") compares to the expected filename.
                 // We wrap in Some() because file_name returns Option<&OsStr>.
 
                 match load_manifest(path) {
@@ -129,7 +129,7 @@ impl Registry {
                         entries.insert(id, manifest);
                         // Insert into the HashMap. If a manifest with this
                         // id already exists, it gets replaced — last one wins.
-                        // This could happen if two .mailroom files claim the
+                        // This could happen if two nest files claim the
                         // same JD address. We log it above so it's visible.
                     }
 
@@ -140,7 +140,7 @@ impl Registry {
                         tracing::warn!(
                             path  = %path.display(),
                             error = %e,
-                            "failed to parse .mailroom — skipping"
+                            "failed to parse nest — skipping"
                         );
                     }
                 }
@@ -169,6 +169,22 @@ impl Registry {
 			entries:    HashMap::new(),
 			node_count: 0,
 		}
+	}
+
+	/// Register a manifest at runtime, after the initial vault walk.
+	///
+	/// This is how a Rookery's attendant makes a freshly minted subnest
+	/// (e.g. "52-B-a1b2c3d4") visible to subsequent lookups without a
+	/// server restart — the same unlock the schema-refresh Lane's own
+	/// "Registry reload" TODO wants, just reached from a different call
+	/// site. Requires `&mut self`, which is why AppState now holds the
+	/// Registry behind a lock rather than a bare Arc — see state.rs.
+	///
+	/// Last-write-wins on a duplicate id, same as the initial vault walk.
+	pub fn insert(&mut self, id: String, manifest: Manifest) {
+		tracing::debug!(id = %id, "registered subnest at runtime");
+		self.entries.insert(id, manifest);
+		self.node_count = self.entries.len();
 	}
 
     /// Look up which JD address handles a given data type, by scanning
@@ -227,7 +243,7 @@ impl Registry {
     }
 }
 
-// ── Helper: load a single .mailroom file ──────────────────────────────────────
+// ── Helper: load a single nest file ──────────────────────────────────────
 
 fn load_manifest(path: &Path) -> anyhow::Result<Manifest> {
     // This function is private (no `pub`) — only used inside this module.

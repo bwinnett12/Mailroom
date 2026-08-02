@@ -51,6 +51,8 @@ pub async fn write(
 ) -> impl IntoResponse {
 
     let jd_address = state.registry
+        .read()
+        .await
         .route_for("text/journal")
         .unwrap_or_else(|| "39.2-3C".to_string());
 
@@ -60,12 +62,14 @@ pub async fn write(
         payload:    Payload::Text(body.content),
         jd_address: Some(jd_address.clone()),
         meta:       std::collections::HashMap::new(),
+        tags:       Vec::new(),
         created_at: body.created_at,
     };
 
     let envelope = inbound.into_envelope();
 
-    let manifest = match state.registry.get(&jd_address) {
+    let registry = state.registry.read().await;
+    let manifest = match registry.get(&jd_address) {
         Some(m) => m,
         None => {
             tracing::error!(jd_address = %jd_address, "journal destination not found in registry");
@@ -73,7 +77,7 @@ pub async fn write(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({
                     "error": "journal destination not found in registry",
-                    "hint":  format!("ensure {} has a .mailroom file in your vault", jd_address)
+                    "hint":  format!("ensure {} has a nest file in your vault", jd_address)
                 })),
             ).into_response();
         }
@@ -193,10 +197,11 @@ pub async fn summary(
     );
     // "20260625" → "2026-06-25" for human-readable display
 
-    let jd_address = req.jd_address.unwrap_or_else(|| {
-        state.registry.route_for("text/journal")
-            .unwrap_or_else(|| "39.2-3C".to_string())
-    });
+    let jd_address = match req.jd_address {
+        Some(addr) => addr,
+        None => state.registry.read().await.route_for("text/journal")
+            .unwrap_or_else(|| "39.2-3C".to_string()),
+    };
 
     // ── Get entries — from request or from disk ───────────────────────────
     let (entries, entry_count) = if let Some(notes) = req.notes {
@@ -399,6 +404,8 @@ async fn read_entries_for_date(
 ) -> anyhow::Result<(String, usize)> {
     // Find the node path from the registry.
     let node_path = state.registry
+        .read()
+        .await
         .get(jd_address)
         .map(|m| m.effective_path())
         .unwrap_or_else(|| jd_address.to_string());

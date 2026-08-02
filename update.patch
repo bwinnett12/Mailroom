@@ -1,0 +1,596 @@
+diff --git a/src/attendant.rs b/src/attendant.rs
+--- a/src/attendant.rs	1970-01-01 00:00:00.000000000 +0000
++++ b/src/attendant.rs	2026-07-30 20:03:39.101835296 +0000
+@@ -0,0 +1,161 @@
++// src/attendant.rs
++//
++// The attendant handles envelopes addressed to a Rookery — a Nest whose
++// `nest` file sets `mailroom.mints_subnests = true` (e.g. 52-B_books).
++// Rather than storing directly, it mints a brand new child Nest beneath
++// the Rookery — its own directory, its own `nest` file, its own JD
++// address — and stores the envelope there instead.
++//
++// This is the USPS-attendant metaphor made literal: the Dodo arrives at
++// the gate (the Rookery) with an envelope; the attendant either points
++// it at an existing child (a dedup hit — the same content already has a
++// Nest) or mints a fresh one and sends it there.
++//
++// Deliberately reuses two things that already existed rather than
++// building new mechanism:
++//   - orchard::create_orchard(), previously only called at bootstrap
++//     time from schema::generate_fresh_tree(), materializes the child's
++//     directory + `nest` file exactly the same way here, at request time.
++//   - store::compute_content_hash(), previously only used for dedup
++//     metadata in EntryMeta, doubles as the addressing scheme itself —
++//     no separate classification algorithm needed.
++
++use crate::{
++    envelope::Envelope,
++    manifest::{Manifest, MailroomConfig, NodeKind, StoreKind},
++    orchard::{create_orchard, OrchardNode},
++    state::AppState,
++    store,
++};
++
++/// Handle an envelope addressed to a Rookery.
++///
++/// Returns the Manifest of wherever the envelope actually ended up —
++/// either a freshly minted child, or an existing one on a dedup hit —
++/// so the caller's routing decision reflects the real destination.
++pub async fn intake(
++    envelope: &Envelope,
++    gate: &Manifest,
++    state: &AppState,
++) -> anyhow::Result<Manifest> {
++    let strategy = gate
++        .mailroom
++        .as_ref()
++        .and_then(|m| m.child_addressing.clone())
++        .unwrap_or_else(|| "content_hash".to_string());
++
++    let child_id = match strategy.as_str() {
++        "content_hash" => content_hash_child_id(gate, envelope).await?,
++        other => {
++            anyhow::bail!(
++                "Rookery {} requests unknown child_addressing strategy '{other}' \
++                 — only 'content_hash' exists today",
++                gate.id
++            );
++        }
++    };
++
++    // ── Dedup check — has this content already got a Nest? ─────────────
++    // A read lock is enough here; we only escalate to a write lock if
++    // we're actually about to mint something new.
++    if let Some(existing) = state.registry.read().await.get(&child_id).cloned() {
++        tracing::info!(
++            id       = %envelope.id,
++            child_id = %child_id,
++            "dedup hit — routing to existing subnest rather than minting"
++        );
++        store::store(envelope, &state.library_root, &existing.effective_path()).await?;
++        return Ok(existing);
++    }
++
++    // ── Mint a fresh child Nest ──────────────────────────────────────────
++    let name = child_slug(envelope);
++
++    // effective_path()'s fallback ("{id}_{name}") assumes the node lives
++    // directly under library_root — true for top-level schema-generated
++    // nodes, but not for a book living under 52-B_books. Set `path`
++    // explicitly to the full relative path, same convention documented
++    // on the field itself ("34_My-story/34.2_Journal"-style), rather
++    // than relying on the derived fallback here.
++    let folder_name = format!("{child_id}_{name}");
++    let full_path = format!("{}/{}", gate.effective_path(), folder_name);
++
++    let child_manifest = Manifest {
++        id:   child_id.clone(),
++        name: name.clone(),
++        path: Some(full_path),
++        kind: NodeKind::Leaf,
++        accepts: vec![envelope.data_type.clone()],
++        store: Some(StoreKind::Overwrite),
++        routing: None,
++        library: None,
++        mailroom: Some(MailroomConfig {
++            active: true,
++            requires_auth: false,
++            notify_on_write: false,
++            ai_classify: false,
++            mints_subnests: false, // a book doesn't itself mint further subnests
++            child_addressing: None,
++        }),
++        about: None,
++        known_tags: Vec::new(),
++    };
++
++    // create_orchard() already exists and already does exactly this —
++    // previously only ever called at bootstrap from generate_fresh_tree().
++    // A one-node slice reuses it unchanged for a single runtime mint.
++    // Parent is library_root itself, not the gate's own directory —
++    // child_manifest.path is already the full relative path (including
++    // the gate's own folder name), so create_station's own
++    // parent_path.join(effective_path()) resolves correctly without
++    // double-joining the gate's prefix.
++    let node = OrchardNode {
++        manifest: child_manifest.clone(),
++        children: Vec::new(),
++    };
++    create_orchard(&[node], &state.library_root)?;
++
++    tracing::info!(
++        id       = %envelope.id,
++        child_id = %child_id,
++        path     = %state.library_root.join(child_manifest.effective_path()).display(),
++        "minted new subnest"
++    );
++
++    // Register it so the *next* lookup (including the store() call right
++    // below, which goes through the same registry-driven path lookup
++    // logic other Nests use) can find it without a server restart.
++    state.registry.write().await.insert(child_id.clone(), child_manifest.clone());
++
++    store::store(envelope, &state.library_root, &child_manifest.effective_path()).await?;
++
++    Ok(child_manifest)
++}
++
++/// content_hash addressing: `{gate_id}-{first 8 hex chars of the sha256}`.
++/// Same truncation precedent as store.rs's own filename short-ids —
++/// not a new convention, just applied to addressing instead of filenames.
++async fn content_hash_child_id(gate: &Manifest, envelope: &Envelope) -> anyhow::Result<String> {
++    let hash = store::compute_content_hash(&envelope.payload)
++        .await?
++        .ok_or_else(|| {
++            anyhow::anyhow!(
++                "content_hash addressing needs hashable content — this envelope's \
++                 payload (e.g. a bare Url) has nothing local to hash"
++            )
++        })?;
++
++    Ok(format!("{}-{}", gate.id, &hash[..8]))
++}
++
++/// A short human-readable slug for the child's folder name — best-effort
++/// only. Falls back to the envelope id if nothing better is available;
++/// nothing downstream depends on this being meaningful, just readable.
++fn child_slug(envelope: &Envelope) -> String {
++    envelope
++        .meta
++        .get("title")
++        .or_else(|| envelope.meta.get("filename"))
++        .cloned()
++        .unwrap_or_else(|| envelope.id.to_string())
++}
+diff --git a/src/envelope.rs b/src/envelope.rs
+--- a/src/envelope.rs	2026-07-30 20:03:39.088807173 +0000
++++ b/src/envelope.rs	2026-07-30 20:03:39.104296744 +0000
+@@ -153,6 +153,17 @@
+     #[serde(default)]
+     // default: if `meta` is missing from incoming JSON, use empty HashMap
+     pub meta: HashMap<String, String>,
++
++    /// Free-form tags — presence means yes, absence means no. Unlike
++    /// `meta`, which is one value per key, tags are inherently
++    /// multi-valued (a recipe can be both "vegetarian" and
++    /// "gluten-free" at once), so a flat Vec (a set, deduped by
++    /// convention rather than by type) fits better than a HashMap of
++    /// booleans would — there's nothing to store for the tags that
++    /// don't apply. Which tags are meaningful for a given Nest is
++    /// documented by that Nest's own `known_tags`, not enforced here.
++    #[serde(default)]
++    pub tags: Vec<String>,
+ }
+ 
+ /// What a caller sends to POST /envelope.
+@@ -168,6 +179,9 @@
+     #[serde(default)]
+     pub meta: HashMap<String, String>,
+ 
++    #[serde(default)]
++    pub tags: Vec<String>,
++
+     /// Callers may optionally provide a created_at timestamp
+     /// if the data was produced earlier (e.g. a queued clip).
+     /// If absent, the Mailroom uses the current time.
+@@ -186,6 +200,7 @@
+             payload:     self.payload,
+             jd_address:  self.jd_address,
+             meta:        self.meta,
++            tags:        self.tags,
+             created_at:  self.created_at.unwrap_or(now),
+             // Use caller's timestamp if provided, otherwise now.
+             received_at: now,
+@@ -229,9 +244,17 @@
+             created_at:  now,
+             received_at: now,
+             meta:        HashMap::new(),
++            tags:        Vec::new(),
+         }
+     }
+ 
++    /// Attach a tag. Returns Self so calls can be chained, same as
++    /// `with_meta` — Envelope::new(...).with_tag("vegetarian").with_tag("quick")
++    pub fn with_tag(mut self, tag: impl Into<String>) -> Self {
++        self.tags.push(tag.into());
++        self
++    }
++
+     /// Attach a metadata key-value pair.
+     /// Returns Self so calls can be chained:
+     ///   Envelope::new(...).with_meta("channel", "ch1").with_meta("duration", "30")
+diff --git a/src/main.rs b/src/main.rs
+--- a/src/main.rs	2026-07-30 20:03:39.089518121 +0000
++++ b/src/main.rs	2026-07-30 20:03:39.105259440 +0000
+@@ -1,5 +1,6 @@
+ // src/main.rs
+ 
++mod attendant;
+ mod envelope;
+ mod inference;
+ mod manifest;
+@@ -26,10 +27,25 @@
+     let addr = std::env::var("MAILROOM_LISTEN")
+         .unwrap_or_else(|_| "0.0.0.0:3000".to_string());
+ 
+-    schema::generate_fresh_tree(
+-       Path::new("schema.ron"),
+-       Path::new("/Users/b/Projects/test-orchard/Orchard"),
+-   )?;
++    // Opt-in, not automatic — see backlog: "Gate generate_fresh_tree's call
++    // in main.rs behind an opt-in flag". generate_fresh_tree() is also not
++    // yet merge-safe (always overwrites), so this stays off by default
++    // even once set up correctly for a real vault, not just to avoid the
++    // previous hardcoded dev-machine path crashing startup on Locomotive.
++    if std::env::var("MAILROOM_GENERATE_SCHEMA").is_ok() {
++        let schema_path = std::env::var("MAILROOM_SCHEMA_PATH")
++            .unwrap_or_else(|_| "schema.ron".to_string());
++        let orchard_root = std::env::var("MAILROOM_ORCHARD_ROOT")
++            .unwrap_or_else(|_| vault_root.clone());
++
++        tracing::warn!(
++            schema = %schema_path,
++            root   = %orchard_root,
++            "MAILROOM_GENERATE_SCHEMA set — regenerating schema tree \
++             (destructive: not yet merge-safe against hand-edited nest files)"
++        );
++        schema::generate_fresh_tree(Path::new(&schema_path), Path::new(&orchard_root))?;
++    }
+ 
+     let inference_config_path = std::env::var("MAILROOM_CONFIG")
+         .unwrap_or_else(|_| "./Mailroom.toml".to_string());
+diff --git a/src/manifest.rs b/src/manifest.rs
+--- a/src/manifest.rs	2026-07-30 20:03:39.087215589 +0000
++++ b/src/manifest.rs	2026-07-30 20:03:39.102884473 +0000
+@@ -75,6 +75,18 @@
+     #[serde(default)]
+     pub about: Option<AboutBlock>,
+     // AI-maintained summary block. None until first `mailroom refresh`.
++
++    #[serde(default)]
++    pub known_tags: Vec<String>,
++    // Documents which tags this Nest's content typically carries —
++    // e.g. ["vegetarian", "gluten-free"] for a recipe Nest, or
++    // ["genre:horror", "rewatch"] for a movies Nest. Purely descriptive
++    // today, same as `accepts` isn't strictly enforced against incoming
++    // envelopes — a future `strict_tags` flag in MailroomConfig could
++    // opt a Nest into validating against this list, but nothing does yet.
++    // Tags themselves stay a flat, unconstrained Vec<String> on the
++    // Envelope/EntryMeta — this field only documents which ones a given
++    // Nest considers meaningful, per its own internal jurisdiction.
+ }
+ impl Manifest {
+     /// Returns the effective path for this node within /storage/Library.
+@@ -173,6 +185,23 @@
+     #[serde(default)]
+     pub ai_classify: bool,
+     // true = ask AI to confirm routing before storing.
++
++    #[serde(default)]
++    pub mints_subnests: bool,
++    // true = this Nest is a Rookery. Envelopes addressed here don't get
++    // stored directly — instead the attendant module mints a brand new
++    // child Nest beneath this one (its own directory + `nest` file,
++    // dynamically addressed) and stores the envelope there. Used for
++    // domains where individual items (books, papers) each deserve their
++    // own JD address, but there are far too many of them to pre-declare
++    // in the master index. See src/attendant.rs.
++
++    #[serde(default)]
++    pub child_addressing: Option<String>,
++    // Which strategy the attendant uses to mint a child's id when
++    // `mints_subnests` is true. Only "content_hash" exists today —
++    // room for "sequential" or "loc_call_number" later without a
++    // schema change. None is treated the same as "content_hash".
+ }
+ 
+ fn default_true() -> bool {
+diff --git a/src/registry.rs b/src/registry.rs
+--- a/src/registry.rs	2026-07-30 20:03:39.086517865 +0000
++++ b/src/registry.rs	2026-07-30 20:03:39.102425295 +0000
+@@ -171,6 +171,22 @@
+ 		}
+ 	}
+ 
++	/// Register a manifest at runtime, after the initial vault walk.
++	///
++	/// This is how a Rookery's attendant makes a freshly minted subnest
++	/// (e.g. "52-B-a1b2c3d4") visible to subsequent lookups without a
++	/// server restart — the same unlock the schema-refresh Lane's own
++	/// "Registry reload" TODO wants, just reached from a different call
++	/// site. Requires `&mut self`, which is why AppState now holds the
++	/// Registry behind a lock rather than a bare Arc — see state.rs.
++	///
++	/// Last-write-wins on a duplicate id, same as the initial vault walk.
++	pub fn insert(&mut self, id: String, manifest: Manifest) {
++		tracing::debug!(id = %id, "registered subnest at runtime");
++		self.entries.insert(id, manifest);
++		self.node_count = self.entries.len();
++	}
++
+     /// Look up which JD address handles a given data type, by scanning
+     /// every node's [routing] table for a matching key. This is what makes
+     /// convenience endpoints (like /journal) location-agnostic — instead of
+diff --git a/src/routes/envelope.rs b/src/routes/envelope.rs
+--- a/src/routes/envelope.rs	2026-07-30 20:03:39.091925272 +0000
++++ b/src/routes/envelope.rs	2026-07-30 20:03:39.107198265 +0000
+@@ -25,8 +25,10 @@
+ // us return different types from a handler.
+ 
+ use crate::{
++    attendant,
+     envelope::{Envelope, InboundEnvelope, Payload},
+     inference::InferenceClient,
++    manifest::Manifest,
+     state::AppState,
+     store,
+ };
+@@ -135,7 +137,11 @@
+ 
+         Some(address) => {
+             // Address provided — look it up in the registry.
+-            match state.registry.get(address) {
++            // .cloned() so we're working with an owned Manifest from here
++            // on — the read guard is a temporary, dropped at the end of
++            // this line, rather than held across the store()/attendant
++            // await calls further down.
++            match state.registry.read().await.get(address).cloned() {
+ 
+                 None => {
+                     // No JD address provided — ask LocalAI to classify this envelope.
+@@ -165,7 +171,7 @@
+                                 // Re-route with the classified address.
+                                 // We do this by updating the envelope and checking
+                                 // the registry — same logic as the Some(address) branch.
+-                                match state.registry.get(&address) {
++                                match state.registry.read().await.get(&address).cloned() {
+                                     Some(manifest) => {
+                                         // Write to disk at the classified address.
+                                         let mut classified = envelope;
+@@ -289,40 +295,64 @@
+ 						);
+ 						
+ 
+-						// ── Write to disk ─────────────────────────────────────────────
+-						let library_root = &state.library_root;
++						// ── Write to disk (or mint a subnest first) ───────────────────
+ 						// For now we write relative to vault_root/Library.
+ 						// When Island is online this becomes /storage/Library.
+ 						// We'll make this path configurable via env var next.
+ 
+-						let jd_path = manifest.effective_path();
+-						// e.g. "34.2_Journal" or "34_My-story/34.2_Journal"
+-						// The manifest tells us where this node lives on disk.
+-
+-						match store::store(&envelope, &library_root, &jd_path).await {
+-							Ok(result) => {
+-								tracing::info!(
+-									content = %result.content_path.display(),
+-									meta    = %result.meta_path.display(),
+-									"written to disk"
+-								);
++						let mints_subnests = manifest.mailroom.as_ref()
++							.is_some_and(|m| m.mints_subnests);
++
++						// The Nest we actually end up storing at — the parent
++						// Rookery itself for a normal node, or the freshly
++						// minted (or matched, on a dedup hit) child if this
++						// Nest is a Rookery. The routing decision below
++						// reflects wherever the envelope actually landed,
++						// not necessarily where it was originally addressed.
++						let landed_at: Manifest = if mints_subnests {
++							match attendant::intake(&envelope, &manifest, &state).await {
++								Ok(child) => child,
++								Err(e) => {
++									tracing::error!(
++										error = %e,
++										id    = %envelope.id,
++										address = %address,
++										"attendant failed to mint subnest — falling back to parent Nest"
++									);
++									manifest.clone()
++								}
+ 							}
+-							Err(e) => {
+-								// Log the error but don't fail the request —
+-								// the routing decision was correct even if the write failed.
+-								// Later: queue the envelope for retry.
+-								tracing::error!(
+-									error = %e,
+-									id    = %envelope.id,
+-									"failed to write envelope to disk"
+-								);
++						} else {
++							let jd_path = manifest.effective_path();
++							// e.g. "34.2_Journal" or "34_My-story/34.2_Journal"
++							// The manifest tells us where this node lives on disk.
++
++							match store::store(&envelope, &state.library_root, &jd_path).await {
++								Ok(result) => {
++									tracing::info!(
++										content = %result.content_path.display(),
++										meta    = %result.meta_path.display(),
++										"written to disk"
++									);
++								}
++								Err(e) => {
++									// Log the error but don't fail the request —
++									// the routing decision was correct even if the write failed.
++									// Later: queue the envelope for retry.
++									tracing::error!(
++										error = %e,
++										id    = %envelope.id,
++										"failed to write envelope to disk"
++									);
++								}
+ 							}
+-						}
++							manifest.clone()
++						};
+ 
+ 						let decision = RoutingDecision {
+ 							envelope_id: envelope.id,
+-							routed_to:   address.clone(),
+-							node_name:   Some(manifest.name.clone()),
++							routed_to:   landed_at.id.clone(),
++							node_name:   Some(landed_at.name.clone()),
+ 							action:      RoutingAction::Accepted,
+ 						};
+ 
+diff --git a/src/routes/journal.rs b/src/routes/journal.rs
+--- a/src/routes/journal.rs	2026-07-30 20:03:39.090588062 +0000
++++ b/src/routes/journal.rs	2026-07-30 20:03:39.106052966 +0000
+@@ -60,12 +60,14 @@
+         payload:    Payload::Text(body.content),
+         jd_address: Some(jd_address.clone()),
+         meta:       std::collections::HashMap::new(),
++        tags:       Vec::new(),
+         created_at: body.created_at,
+     };
+ 
+     let envelope = inbound.into_envelope();
+ 
+-    let manifest = match state.registry.get(&jd_address) {
++    let registry = state.registry.read().await;
++    let manifest = match registry.get(&jd_address) {
+         Some(m) => m,
+         None => {
+             tracing::error!(jd_address = %jd_address, "journal destination not found in registry");
+@@ -193,10 +195,11 @@
+     );
+     // "20260625" → "2026-06-25" for human-readable display
+ 
+-    let jd_address = req.jd_address.unwrap_or_else(|| {
+-        state.registry.route_for("text/journal")
+-            .unwrap_or_else(|| "39.2-3C".to_string())
+-    });
++    let jd_address = match req.jd_address {
++        Some(addr) => addr,
++        None => state.registry.read().await.route_for("text/journal")
++            .unwrap_or_else(|| "39.2-3C".to_string()),
++    };
+ 
+     // ── Get entries — from request or from disk ───────────────────────────
+     let (entries, entry_count) = if let Some(notes) = req.notes {
+@@ -399,6 +402,8 @@
+ ) -> anyhow::Result<(String, usize)> {
+     // Find the node path from the registry.
+     let node_path = state.registry
++        .read()
++        .await
+         .get(jd_address)
+         .map(|m| m.effective_path())
+         .unwrap_or_else(|| jd_address.to_string());
+diff --git a/src/routes/web.rs b/src/routes/web.rs
+--- a/src/routes/web.rs	2026-07-30 20:03:39.091216703 +0000
++++ b/src/routes/web.rs	2026-07-30 20:03:39.106622588 +0000
+@@ -26,7 +26,7 @@
+ }
+ 
+ pub async fn new_envelope_form(State(state): State<Arc<AppState>>) -> Response {
+-    let routes = state.registry.all()
++    let routes = state.registry.read().await.all()
+         .into_iter()
+         .map(|m| (m.id.clone(), m.name.clone()))
+         .collect();
+@@ -57,11 +57,13 @@
+         payload: Payload::Text(body.content),
+         jd_address: Some(body.jd_address.clone()),
+         meta: std::collections::HashMap::new(),
++        tags: Vec::new(),
+         created_at: None,
+     };
+     let envelope = inbound.into_envelope();
+ 
+-    let manifest = match state.registry.get(&body.jd_address) {
++    let registry = state.registry.read().await;
++    let manifest = match registry.get(&body.jd_address) {
+         Some(m) => m,
+         None => return render(SubmitResultTemplate {
+             success: false,
+diff --git a/src/state.rs b/src/state.rs
+--- a/src/state.rs	2026-07-30 20:03:39.089094612 +0000
++++ b/src/state.rs	2026-07-30 20:03:39.104956723 +0000
+@@ -182,7 +182,14 @@
+     pub library_root: PathBuf,
+  
+     /// Live registry built from nest files at startup.
+-    pub registry: std::sync::Arc<Registry>,
++    ///
++    /// Was a bare Arc<Registry> — genuinely read-only, matching the
++    /// doc comment in registry.rs. A Rookery minting a subnest at
++    /// request time needs to register it before the next lookup can
++    /// find it, so this is now a RwLock: ordinary handlers take a
++    /// cheap read lock (the common case, many concurrent readers),
++    /// the attendant takes a brief write lock only when minting.
++    pub registry: std::sync::Arc<tokio::sync::RwLock<Registry>>,
+  
+     /// Shared HTTP client for all outbound requests.
+     /// One instance, shared across all handlers via Arc inside Client.
+@@ -202,7 +209,7 @@
+         Self {
+             vault_root: vault_root.into(),
+             library_root: library_root.into(),
+-            registry: std::sync::Arc::new(registry),
++            registry: std::sync::Arc::new(tokio::sync::RwLock::new(registry)),
+             http_client: Client::new(),
+             inference,
+         }
+diff --git a/src/store.rs b/src/store.rs
+--- a/src/store.rs	2026-07-30 20:03:39.087751377 +0000
++++ b/src/store.rs	2026-07-30 20:03:39.103331208 +0000
+@@ -124,6 +124,14 @@
+ 
+     #[serde(default)]
+     pub content_hash: Option<String>,
++
++    #[serde(default)]
++    // `default` matters here specifically: EntryMeta sidecars get read
++    // back from disk by the list handler, and any .meta.json written
++    // before this field existed won't have a `tags` key — without the
++    // default, those would fail to deserialize instead of just showing
++    // an empty tag list.
++    pub tags: Vec<String>,
+ }
+ 
+ impl EntryMeta {
+@@ -142,7 +150,8 @@
+             pinned:       false,
+             starred:      false,
+ 
+-            content_hash 
++            content_hash,
++            tags: envelope.tags.clone(),
+         }
+     }
+ }
+@@ -224,7 +233,7 @@
+ /// local to hash (Url). For FilePath, hashes the *referenced file's*
+ /// bytes, not the .ref pointer text — that's what actually lets Mailroom
+ /// detect duplicate copies of the same file across different locations.
+-async fn compute_content_hash(payload: &Payload) -> anyhow::Result<Option<String>> {
++pub(crate) async fn compute_content_hash(payload: &Payload) -> anyhow::Result<Option<String>> {
+     let mut hasher = Sha256::new();
+ 
+     match payload {

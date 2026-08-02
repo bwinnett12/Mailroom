@@ -35,7 +35,7 @@ use uuid::Uuid;
 #[non_exhaustive]
 pub enum Source {
     /// A named peripheral device — audio interface, camera, sensor.
-    /// The String is the device's ID as declared in its .mailroom manifest.
+    /// The String is the device's ID as declared in its nest manifest.
     /// Examples: "scarlett-ch1", "pi-camera", "co2-sensor"
     Device(String),
 
@@ -153,6 +153,17 @@ pub struct Envelope {
     #[serde(default)]
     // default: if `meta` is missing from incoming JSON, use empty HashMap
     pub meta: HashMap<String, String>,
+
+    /// Free-form tags — presence means yes, absence means no. Unlike
+    /// `meta`, which is one value per key, tags are inherently
+    /// multi-valued (a recipe can be both "vegetarian" and
+    /// "gluten-free" at once), so a flat Vec (a set, deduped by
+    /// convention rather than by type) fits better than a HashMap of
+    /// booleans would — there's nothing to store for the tags that
+    /// don't apply. Which tags are meaningful for a given Nest is
+    /// documented by that Nest's own `known_tags`, not enforced here.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 /// What a caller sends to POST /envelope.
@@ -167,6 +178,9 @@ pub struct InboundEnvelope {
 
     #[serde(default)]
     pub meta: HashMap<String, String>,
+
+    #[serde(default)]
+    pub tags: Vec<String>,
 
     /// Callers may optionally provide a created_at timestamp
     /// if the data was produced earlier (e.g. a queued clip).
@@ -186,6 +200,7 @@ impl InboundEnvelope {
             payload:     self.payload,
             jd_address:  self.jd_address,
             meta:        self.meta,
+            tags:        self.tags,
             created_at:  self.created_at.unwrap_or(now),
             // Use caller's timestamp if provided, otherwise now.
             received_at: now,
@@ -229,7 +244,15 @@ impl Envelope {
             created_at:  now,
             received_at: now,
             meta:        HashMap::new(),
+            tags:        Vec::new(),
         }
+    }
+
+    /// Attach a tag. Returns Self so calls can be chained, same as
+    /// `with_meta` — Envelope::new(...).with_tag("vegetarian").with_tag("quick")
+    pub fn with_tag(mut self, tag: impl Into<String>) -> Self {
+        self.tags.push(tag.into());
+        self
     }
 
     /// Attach a metadata key-value pair.

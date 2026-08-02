@@ -181,8 +181,15 @@ pub struct AppState {
  
     pub library_root: PathBuf,
  
-    /// Live registry built from .mailroom files at startup.
-    pub registry: std::sync::Arc<Registry>,
+    /// Live registry built from nest files at startup.
+    ///
+    /// Was a bare Arc<Registry> — genuinely read-only, matching the
+    /// doc comment in registry.rs. A Rookery minting a subnest at
+    /// request time needs to register it before the next lookup can
+    /// find it, so this is now a RwLock: ordinary handlers take a
+    /// cheap read lock (the common case, many concurrent readers),
+    /// the attendant takes a brief write lock only when minting.
+    pub registry: std::sync::Arc<tokio::sync::RwLock<Registry>>,
  
     /// Shared HTTP client for all outbound requests.
     /// One instance, shared across all handlers via Arc inside Client.
@@ -190,6 +197,7 @@ pub struct AppState {
  
     /// Task table and model routing config.
     pub inference: InferenceConfig,
+    pub title_cleanup: Vec<String>,
 }
  
 impl AppState {
@@ -198,13 +206,16 @@ impl AppState {
         library_root: impl Into<PathBuf>,
         registry: Registry,
         inference: InferenceConfig,
+        title_cleanup: Vec<String>,
     ) -> Self {
         Self {
             vault_root: vault_root.into(),
             library_root: library_root.into(),
-            registry: std::sync::Arc::new(registry),
+            registry: std::sync::Arc::new(tokio::sync::RwLock::new(registry)),
             http_client: Client::new(),
             inference,
+            title_cleanup, 
+
         }
     }
 }

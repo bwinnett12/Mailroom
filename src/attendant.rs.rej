@@ -1,0 +1,36 @@
+@@ -60,17 +60,24 @@
+     // A read lock is enough here; we only escalate to a write lock if
+     // we're actually about to mint something new.
+     if let Some(existing) = state.registry.read().await.get(&child_id).cloned() {
++        // A dedup hit means child_id — derived from this content's own
++        // hash — already exists, which by construction means the bytes
++        // are byte-for-byte identical to what's already on disk. There's
++        // no scenario where this branch runs on genuinely different
++        // content. Writing another full copy into entries/ every time
++        // the same file gets resent is pure waste with zero new
++        // information — an early real test surfaced exactly this: three
++        // 11MB copies of the same PDF from three identical uploads.
+         tracing::info!(
+             id       = %envelope.id,
+             child_id = %child_id,
+-            "dedup hit — routing to existing subnest rather than minting"
++            "dedup hit — identical content already stored, skipping redundant write"
+         );
+-        store::store(envelope, &state.library_root, &existing.effective_path()).await?;
+         return Ok(existing);
+     }
+ 
+     // ── Mint a fresh child Nest ──────────────────────────────────────────
+-    let name = child_slug(envelope);
++    let name = child_slug(envelope, &state.title_cleanup);
+ 
+     // effective_path()'s fallback ("{id}_{name}") assumes the node lives
+     // directly under library_root — true for top-level schema-generated
+@@ -100,6 +107,7 @@
+         }),
+         about: None,
+         known_tags: Vec::new(),
++        call_number: envelope.meta.get("call_number").cloned(),
+     };
+ 
+     // create_orchard() already exists and already does exactly this —

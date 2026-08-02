@@ -15,7 +15,7 @@ pub mod journal;
 pub mod web;
 
 use std::sync::Arc;
-use axum::{routing::{get, post}, Router};
+use axum::{extract::DefaultBodyLimit, routing::{get, post}, Router};
 use crate::state::AppState;
 
 /// Build and return the complete application router.
@@ -30,6 +30,10 @@ pub fn router(state: Arc<AppState>) -> Router {
 
 		// -- Multiple Entries
 		.route("/envelopes", get(entries::list))
+
+        // -- Envelope Upload
+        .route("/envelope/upload", post(envelope::upload))
+        .layer(DefaultBodyLimit::max(200 * 1024 * 1024)) // 200MB
 
         // -- Curate Journal
         .route("/journal",         post(journal::write))

@@ -47,19 +47,33 @@ fn origin_code(source: &Source) -> &'static str {
 
 // ── File extension ────────────────────────────────────────────────────────────
 
-/// File extension for the content file, derived from the payload type.
-/// The file is what it is — no wrapping, no indirection.
-fn content_extension(payload: &Payload) -> &'static str {
-    match payload {
-        Payload::Text(_)     => "md",
-        Payload::Json(_)     => "json",
-        Payload::Bytes(_)    => "bin",
-        Payload::FilePath(_) => "ref",
+/// File extension for the content file.
+///
+/// Usually derived from the payload type — but Payload::Bytes carries
+/// no format information of its own (raw bytes could be anything), so
+/// for that variant we check envelope.meta["filename"] first — the
+/// same key attendant.rs's child_slug() already reads as a title
+/// fallback — and derive the extension from whatever follows the last
+/// '.' there. Not upload-route-specific: any future ingestion path
+/// that sets meta["filename"] on a Bytes payload gets the correct
+/// extension the same way, automatically, with no extra plumbing.
+fn content_extension(envelope: &Envelope) -> String {
+    match &envelope.payload {
+        Payload::Text(_)     => "md".to_string(),
+        Payload::Json(_)     => "json".to_string(),
+        Payload::FilePath(_) => "ref".to_string(),
         // .ref = a reference file — contains the path, not the bytes.
         // The actual file lives wherever FilePath points.
         // We don't copy large files into entries/ — we record where they are.
-        Payload::Url(_)      => "url",
+        Payload::Url(_)      => "url".to_string(),
         // .url = a URL reference file — contains the URL as plain text.
+        Payload::Bytes(_) => {
+            envelope.meta.get("filename")
+                .and_then(|name| name.rsplit_once('.'))
+                .map(|(_, ext)| ext.to_lowercase())
+                .filter(|ext| !ext.is_empty())
+                .unwrap_or_else(|| "bin".to_string())
+        }
     }
 }
 
@@ -124,6 +138,14 @@ pub struct EntryMeta {
 
     #[serde(default)]
     pub content_hash: Option<String>,
+
+    #[serde(default)]
+    // `default` matters here specifically: EntryMeta sidecars get read
+    // back from disk by the list handler, and any .meta.json written
+    // before this field existed won't have a `tags` key — without the
+    // default, those would fail to deserialize instead of just showing
+    // an empty tag list.
+    pub tags: Vec<String>,
 }
 
 impl EntryMeta {
@@ -142,7 +164,8 @@ impl EntryMeta {
             pinned:       false,
             starred:      false,
 
-            content_hash 
+            content_hash,
+            tags: envelope.tags.clone(),
         }
     }
 }
@@ -189,7 +212,7 @@ pub async fn store(
 
     // ── Build filenames ───────────────────────────────────────────────────────
     let base      = build_filename(envelope);
-    let ext       = content_extension(&envelope.payload);
+    let ext       = content_extension(envelope);
     let content_filename = format!("{base}.{ext}");
     let meta_filename    = format!("{base}.meta.json");
 
@@ -224,7 +247,7 @@ pub async fn store(
 /// local to hash (Url). For FilePath, hashes the *referenced file's*
 /// bytes, not the .ref pointer text — that's what actually lets Mailroom
 /// detect duplicate copies of the same file across different locations.
-async fn compute_content_hash(payload: &Payload) -> anyhow::Result<Option<String>> {
+pub(crate) async fn compute_content_hash(payload: &Payload) -> anyhow::Result<Option<String>> {
     let mut hasher = Sha256::new();
 
     match payload {

@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::State,
+    extract::{Multipart, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
@@ -25,8 +25,10 @@ use axum::{
 // us return different types from a handler.
 
 use crate::{
-    envelope::{Envelope, InboundEnvelope, Payload},
+    attendant,
+    envelope::{Envelope, InboundEnvelope, Payload, Source},
     inference::InferenceClient,
+    manifest::Manifest,
     state::AppState,
     store,
 };
@@ -135,7 +137,23 @@ pub async fn receive(
 
         Some(address) => {
             // Address provided — look it up in the registry.
-            match state.registry.get(address) {
+            // .cloned() so we're working with an owned Manifest from here
+            // on — the read guard is a temporary, dropped at the end of
+            // this line, rather than held across the store()/attendant
+            // await calls further down.
+            // Bound to a `let` deliberately, not chained directly into the
+            // match scrutinee below — a temporary RwLockReadGuard created
+            // *in* a match scrutinee stays alive for the whole match
+            // expression (every arm body), not just the lookup itself.
+            // That would hold this read lock through the mints_subnests
+            // branch further down, which needs a write lock — same task,
+            // waiting on itself, guaranteed deadlock. Binding it here means
+            // the guard (a genuine temporary of this statement) drops at
+            // the semicolon; `looked_up` itself is a fully owned Option<Manifest>
+            // (thanks to .cloned()) with no borrow left to justify holding
+            // the lock any longer.
+            let looked_up = state.registry.read().await.get(address).cloned();
+            match looked_up {
 
                 None => {
                     // No JD address provided — ask LocalAI to classify this envelope.
@@ -165,7 +183,8 @@ pub async fn receive(
                                 // Re-route with the classified address.
                                 // We do this by updating the envelope and checking
                                 // the registry — same logic as the Some(address) branch.
-                                match state.registry.get(&address) {
+                                let looked_up = state.registry.read().await.get(&address).cloned();
+                                match looked_up {
                                     Some(manifest) => {
                                         // Write to disk at the classified address.
                                         let mut classified = envelope;
@@ -289,40 +308,64 @@ pub async fn receive(
 						);
 						
 
-						// ── Write to disk ─────────────────────────────────────────────
-						let library_root = &state.library_root;
+						// ── Write to disk (or mint a subnest first) ───────────────────
 						// For now we write relative to vault_root/Library.
 						// When Island is online this becomes /storage/Library.
 						// We'll make this path configurable via env var next.
 
-						let jd_path = manifest.effective_path();
-						// e.g. "34.2_Journal" or "34_My-story/34.2_Journal"
-						// The manifest tells us where this node lives on disk.
+						let mints_subnests = manifest.mailroom.as_ref()
+							.is_some_and(|m| m.mints_subnests);
 
-						match store::store(&envelope, &library_root, &jd_path).await {
-							Ok(result) => {
-								tracing::info!(
-									content = %result.content_path.display(),
-									meta    = %result.meta_path.display(),
-									"written to disk"
-								);
+						// The Nest we actually end up storing at — the parent
+						// Rookery itself for a normal node, or the freshly
+						// minted (or matched, on a dedup hit) child if this
+						// Nest is a Rookery. The routing decision below
+						// reflects wherever the envelope actually landed,
+						// not necessarily where it was originally addressed.
+						let landed_at: Manifest = if mints_subnests {
+							match attendant::intake(&envelope, &manifest, &state).await {
+								Ok(child) => child,
+								Err(e) => {
+									tracing::error!(
+										error = %e,
+										id    = %envelope.id,
+										address = %address,
+										"attendant failed to mint subnest — falling back to parent Nest"
+									);
+									manifest.clone()
+								}
 							}
-							Err(e) => {
-								// Log the error but don't fail the request —
-								// the routing decision was correct even if the write failed.
-								// Later: queue the envelope for retry.
-								tracing::error!(
-									error = %e,
-									id    = %envelope.id,
-									"failed to write envelope to disk"
-								);
+						} else {
+							let jd_path = manifest.effective_path();
+							// e.g. "34.2_Journal" or "34_My-story/34.2_Journal"
+							// The manifest tells us where this node lives on disk.
+
+							match store::store(&envelope, &state.library_root, &jd_path).await {
+								Ok(result) => {
+									tracing::info!(
+										content = %result.content_path.display(),
+										meta    = %result.meta_path.display(),
+										"written to disk"
+									);
+								}
+								Err(e) => {
+									// Log the error but don't fail the request —
+									// the routing decision was correct even if the write failed.
+									// Later: queue the envelope for retry.
+									tracing::error!(
+										error = %e,
+										id    = %envelope.id,
+										"failed to write envelope to disk"
+									);
+								}
 							}
-						}
+							manifest.clone()
+						};
 
 						let decision = RoutingDecision {
 							envelope_id: envelope.id,
-							routed_to:   address.clone(),
-							node_name:   Some(manifest.name.clone()),
+							routed_to:   landed_at.id.clone(),
+							node_name:   Some(landed_at.name.clone()),
 							action:      RoutingAction::Accepted,
 						};
 
@@ -374,4 +417,136 @@ fn is_valid_jd_address(s: &str) -> bool {
     // .chars().next() — get the first character as Option<char>
     // .map(|c| c.is_ascii_digit()) — check if it's 0-9
     // .unwrap_or(false) — empty string returns false
+}
+
+/// POST /envelope/upload
+///
+/// Like POST /envelope, but for real file content sent from a remote
+/// device — multipart/form-data instead of JSON.
+///
+/// Payload::FilePath (used by plain /envelope) is a *reference*: the
+/// Mailroom process itself opens whatever path you give it on its own
+/// local filesystem. It never transmits bytes over the network at all
+/// — if the file only exists on some other device (Loom, say) and
+/// Mailroom is running on Locomotive, a FilePath payload naming a
+/// Loom-local path simply won't resolve there.
+///
+/// This route is the actual "a device somewhere else has a real file,
+/// get it into the vault" mechanism: it reads the real bytes over the
+/// wire and constructs Payload::Bytes, which store() writes as a
+/// genuine copy into entries/ — not a pointer — landing it in the
+/// store of truth the way you'd want a real intake pipeline to work.
+///
+/// Expected multipart fields:
+///   file        — the actual file content (required)
+///   data_type   — e.g. "media/book" (required)
+///   jd_address  — e.g. "52-B" (required — no AI-classification
+///                 fallback on this path yet, unlike /envelope)
+///   title       — optional, becomes meta["title"]
+pub async fn upload(
+    State(state): State<Arc<AppState>>,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    let mut file_bytes: Option<Vec<u8>> = None;
+    let mut data_type:  Option<String>  = None;
+    let mut jd_address: Option<String>  = None;
+    let mut title:      Option<String>  = None;
+    let mut filename:   Option<String>  = None;
+
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(f)) => f,
+            Ok(None) => break,
+            Err(e) => {
+                return (StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": format!("multipart error: {e}") }))
+                ).into_response();
+            }
+        };
+
+        match field.name().unwrap_or("").to_string().as_str() {
+            "file" => {
+                // file_name() reads from the field's Content-Disposition
+                // header — grab it before .bytes() consumes the field.
+                filename = field.file_name().map(|s| s.to_string());
+                match field.bytes().await {
+                    Ok(b) => file_bytes = Some(b.to_vec()),
+                    Err(e) => return (StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({ "error": format!("failed to read file field: {e}") }))
+                    ).into_response(),
+                }
+            }
+            "data_type"  => data_type  = field.text().await.ok(),
+            "jd_address" => jd_address = field.text().await.ok(),
+            "title"      => title      = field.text().await.ok(),
+            _ => { /* ignore unknown fields rather than erroring */ }
+        }
+    }
+
+    let (Some(bytes), Some(data_type), Some(jd_address)) = (file_bytes, data_type, jd_address) else {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": "upload requires 'file', 'data_type', and 'jd_address' fields"
+        }))).into_response();
+    };
+
+    let mut envelope = Envelope::new(
+        Source::Manual,
+        data_type,
+        Payload::Bytes(bytes),
+        Some(jd_address.clone()),
+    );
+    if let Some(t) = title {
+        envelope = envelope.with_meta("title", t);
+    }
+    if let Some(f) = filename {
+        // Same meta key attendant.rs's child_slug() already reads as a
+        // title fallback — and now also what store.rs's
+        // content_extension() reads to pick the real extension instead
+        // of defaulting every Bytes payload to .bin.
+        envelope = envelope.with_meta("filename", f);
+    }
+
+    // Deliberately duplicated from receive()'s dispatch logic rather
+    // than factored into a shared function — that logic has already
+    // been proven working end to end this session, and refactoring it
+    // to share code with a brand-new handler risks the same drift/patch
+    // problems already hit twice today. Worth factoring out once this
+    // path is proven too.
+    let looked_up = state.registry.read().await.get(&jd_address).cloned();
+    let manifest = match looked_up {
+        Some(m) => m,
+        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": format!("unknown jd_address: {jd_address}")
+        }))).into_response(),
+    };
+
+    let mints_subnests = manifest.mailroom.as_ref().is_some_and(|m| m.mints_subnests);
+
+    let landed_at = if mints_subnests {
+        match attendant::intake(&envelope, &manifest, &state).await {
+            Ok(child) => child,
+            Err(e) => {
+                tracing::error!(error = %e, id = %envelope.id, "attendant failed to mint subnest — falling back to parent Nest");
+                manifest.clone()
+            }
+        }
+    } else {
+        let jd_path = manifest.effective_path();
+        match store::store(&envelope, &state.library_root, &jd_path).await {
+            Ok(result) => {
+                tracing::info!(content = %result.content_path.display(), meta = %result.meta_path.display(), "uploaded file written to disk");
+            }
+            Err(e) => {
+                tracing::error!(error = %e, id = %envelope.id, "failed to write uploaded envelope to disk");
+            }
+        }
+        manifest.clone()
+    };
+
+    (StatusCode::CREATED, Json(serde_json::json!({
+        "envelope_id": envelope.id.to_string(),
+        "routed_to":   landed_at.id,
+        "node_name":   landed_at.name,
+        "action":      "accepted",
+    }))).into_response()
 }

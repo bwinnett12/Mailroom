@@ -1,0 +1,492 @@
+diff --git a/src/move_branch.rs b/src/move_branch.rs
+--- a/src/move_branch.rs	2026-08-01 20:41:48.000000000 +0000
++++ b/src/move_branch.rs	2026-08-01 21:32:12.018077917 +0000
+@@ -22,6 +22,27 @@
+ 
+ use crate::manifest::Manifest;
+ 
++/// What to do if the destination id already has its own Nest — this is
++/// a genuinely different situation from a plain move, not an error
++/// case to reject outright.
++#[derive(Debug, Clone, Copy, PartialEq)]
++pub enum MergeStrategy {
++    /// Destination's own nest file wins entirely. Source's manifest
++    /// directives (accepts, routing, known_tags, etc.) are discarded —
++    /// only its physical content (entries/, any further children) gets
++    /// moved in underneath the destination's existing manifest.
++    KeepDestination,
++    /// Source's nest file replaces destination's entirely (id/path
++    /// updated to the destination's actual location either way).
++    TakeSource,
++    /// Don't resolve anything automatically. Report every field that
++    /// differs between the two manifests and stop — nothing is moved
++    /// or written until you rerun with an explicit KeepDestination/
++    /// TakeSource choice, or hand-edit one of the nest files yourself.
++    /// This is the safe default when a destination already exists.
++    Compare,
++}
++
+ /// Addresses baked into Rust source as literal string fallbacks — see
+ /// routes/journal.rs ("39.2-3C") and routes/envelope.rs ("82.2"). These
+ /// can't be rewritten by this tool; renaming one of these ids also
+@@ -43,6 +64,10 @@
+     /// (nest file path, data_type key) for every [routing] rule rewired.
+     pub rewired_routing_rules: Vec<(String, String)>,
+     pub hardcoded_warnings: Vec<String>,
++    /// Populated only when the destination already existed and
++    /// MergeStrategy::Compare was used (or implicitly applied).
++    pub manifest_diffs: Vec<String>,
++    pub merged_into_existing: bool,
+     pub dry_run: bool,
+ }
+ 
+@@ -64,6 +89,7 @@
+     vault_root: &Path,
+     from_id: &str,
+     to_id: &str,
++    merge_strategy: MergeStrategy,
+     dry_run: bool,
+ ) -> anyhow::Result<MoveBranchReport> {
+     // ── 1. Locate from_id ────────────────────────────────────────────
+@@ -88,21 +114,6 @@
+     let new_folder_name = format!("{}_{}", to_id, crate::attendant::slugify(&manifest.name));
+     let new_dir = parent_dir.join(&new_folder_name);
+ 
+-    // Preserve however deep this node was nested — swap only the final
+-    // path segment (its own folder) for the new one, same as
+-    // attendant.rs already does when it sets an explicit `path` rather
+-    // than relying on effective_path()'s bare-name fallback.
+-    let new_rel_path = match &manifest.path {
+-        Some(old_full) => {
+-            let mut parts: Vec<&str> = old_full.split('/').collect();
+-            if let Some(last) = parts.last_mut() {
+-                *last = &new_folder_name;
+-            }
+-            parts.join("/")
+-        }
+-        None => new_folder_name.clone(),
+-    };
+-
+     let mut report = MoveBranchReport {
+         from_id: from_id.to_string(),
+         to_id: to_id.to_string(),
+@@ -110,6 +121,8 @@
+         new_path: new_dir.clone(),
+         rewired_routing_rules: Vec::new(),
+         hardcoded_warnings: Vec::new(),
++        manifest_diffs: Vec::new(),
++        merged_into_existing: false,
+         dry_run,
+     };
+ 
+@@ -126,27 +139,67 @@
+         }
+     }
+ 
++    let destination_exists = new_dir.exists();
++    let mut existing_manifest: Option<Manifest> = None;
++
++    if destination_exists {
++        let existing_text = std::fs::read_to_string(new_dir.join("nest"))?;
++        let parsed: Manifest = toml::from_str(&existing_text)?;
++        report.manifest_diffs = diff_manifests(&manifest, &parsed);
++        report.merged_into_existing = true;
++        existing_manifest = Some(parsed);
++
++        if merge_strategy == MergeStrategy::Compare {
++            tracing::info!(
++                from_id, to_id,
++                diffs = report.manifest_diffs.len(),
++                "move_branch: destination already exists — Compare mode, \
++                 nothing written, rerun with an explicit strategy"
++            );
++            return Ok(report); // diagnostic only — no writes, regardless of dry_run
++        }
++    }
++
+     if dry_run {
+         tracing::info!(
+             from_id, to_id,
+             old_dir = %old_dir.display(),
+             new_dir = %new_dir.display(),
++            destination_exists,
+             "move_branch dry run — no changes made"
+         );
+         return Ok(report);
+     }
+ 
+-    if new_dir.exists() {
+-        anyhow::bail!("destination already exists: {}", new_dir.display());
++    if destination_exists {
++        // ── Merge path ────────────────────────────────────────────────
++        merge_directory_contents(&old_dir, &new_dir)?;
++
++        if merge_strategy == MergeStrategy::TakeSource {
++            manifest.id = to_id.to_string();
++            manifest.path = relative_manifest_path(&new_dir, vault_root)?;
++            let toml_text = toml::to_string_pretty(&manifest)?;
++            std::fs::write(new_dir.join("nest"), toml_text)?;
++        }
++        // KeepDestination: destination's nest file is left exactly as
++        // it was — only the physical content got merged in above.
++        let _ = existing_manifest; // read for the diff above; not written back here
++
++        let _ = std::fs::remove_file(&old_nest_path);
++        std::fs::remove_dir(&old_dir).ok(); // best-effort; non-empty = leave it, don't lose data
++
++        tracing::info!(from_id, to_id, strategy = ?merge_strategy, "move_branch merged into existing destination");
++        return Ok(report);
+     }
+ 
++    // ── Plain move path — no destination conflict ─────────────────────
+     // ── 4. Physical move ──────────────────────────────────────────────
+     std::fs::rename(&old_dir, &new_dir)?;
+     tracing::info!(from = %old_dir.display(), to = %new_dir.display(), "moved directory");
+ 
+     // ── 5. Rewrite the moved nest file's own id/path ──────────────────
+     manifest.id = to_id.to_string();
+-    manifest.path = Some(new_rel_path);
++    manifest.path = relative_manifest_path(&new_dir, vault_root)?;
+ 
+     let moved_nest_path = new_dir.join("nest");
+     let toml_text = toml::to_string_pretty(&manifest)?;
+@@ -198,6 +251,82 @@
+     Ok(report)
+ }
+ 
++/// Move everything inside `from_dir` into `to_dir`, except `from_dir`'s
++/// own `nest` file (the caller decides what happens to the destination's
++/// manifest separately, per MergeStrategy). For a top-level entry that
++/// doesn't already exist under `to_dir`, this is a plain rename (cheap,
++/// same-filesystem). For one that already exists — e.g. both nests
++/// independently have an `entries/` folder — we recurse and merge
++/// file-by-file instead of overwriting, since a straight rename onto an
++/// existing path would just fail.
++fn merge_directory_contents(from_dir: &Path, to_dir: &Path) -> anyhow::Result<()> {
++    for entry in std::fs::read_dir(from_dir)? {
++        let entry = entry?;
++        let name = entry.file_name();
++        if name == "nest" {
++            continue;
++        }
++
++        let from_path = entry.path();
++        let to_path = to_dir.join(&name);
++
++        if to_path.exists() {
++            if from_path.is_dir() && to_path.is_dir() {
++                merge_directory_contents(&from_path, &to_path)?;
++                let _ = std::fs::remove_dir(&from_path); // now-empty, best-effort
++            } else {
++                // A genuine filename collision between two non-directory
++                // entries — extremely unlikely given entries/ filenames
++                // already embed a timestamp + short id, but refuse rather
++                // than silently overwrite if it ever happens.
++                anyhow::bail!(
++                    "merge collision: {} already exists at destination and isn't \
++                     a directory to merge into — resolve by hand before retrying",
++                    to_path.display()
++                );
++            }
++        } else {
++            std::fs::rename(&from_path, &to_path)?;
++        }
++    }
++    Ok(())
++}
++
++/// Field-by-field comparison between two manifests, formatted for a
++/// human to read — not an automatic resolution. Uses Debug formatting
++/// for comparison rather than requiring PartialEq on every nested
++/// config type.
++fn diff_manifests(source: &Manifest, destination: &Manifest) -> Vec<String> {
++    let mut diffs = Vec::new();
++    macro_rules! check {
++        ($field:ident, $label:literal) => {
++            if format!("{:?}", source.$field) != format!("{:?}", destination.$field) {
++                diffs.push(format!(
++                    "{}: source = {:?}  |  destination = {:?}",
++                    $label, source.$field, destination.$field
++                ));
++            }
++        };
++    }
++    check!(name, "name");
++    check!(kind, "kind");
++    check!(accepts, "accepts");
++    check!(store, "store");
++    check!(routing, "routing");
++    check!(library, "library");
++    check!(known_tags, "known_tags");
++    check!(call_number, "call_number");
++    diffs
++}
++
++/// The new manifest `path` field, relative to vault_root, matching the
++/// convention documented on Manifest::path itself.
++fn relative_manifest_path(new_dir: &Path, vault_root: &Path) -> anyhow::Result<Option<String>> {
++    let rel = new_dir.strip_prefix(vault_root)
++        .map_err(|_| anyhow::anyhow!("{} is not under vault_root {}", new_dir.display(), vault_root.display()))?;
++    Ok(Some(rel.to_string_lossy().replace('\\', "/")))
++}
++
+ /// Walk the vault looking for the nest file whose parsed id matches.
+ /// Same tolerance as Registry::load — a bad TOML file elsewhere in the
+ /// vault is skipped, not fatal to the search.
+diff --git a/src/cli.rs b/src/cli.rs
+--- a/src/cli.rs	2026-07-30 20:11:55.000000000 +0000
++++ b/src/cli.rs	2026-08-01 21:32:02.076293395 +0000
+@@ -178,6 +178,7 @@
+         mailroom: None,
+         about: None,
+         known_tags: Vec::new(),
++        call_number: None,
+     }
+ }
+ 
+@@ -229,6 +230,103 @@
+     Ok(value)
+ }
+ 
++// ── move-branch subcommand ──────────────────────────────────────────────
++//
++// Safe JD renumbering: rename a Nest's id, move its physical directory
++// to match, rewire any other nest file's [routing] rules that pointed
++// at the old id, and merge properly if the destination id already has
++// its own Nest (see move_branch.rs's MergeStrategy for the three
++// explicit resolution options).
++//
++// Usage:
++//   cargo run -- move-branch --from 52-B-bbc35551 --to 663.44
++//   cargo run -- move-branch --from 52-B-bbc35551 --to 663.44 --dry-run
++//   cargo run -- move-branch --from 52-B-bbc35551 --to 663.44 --merge take-source
++//
++// Flags:
++//   --from <id>     required — the id to rename away from
++//   --to <id>       required — the new id
++//   --vault <path>  falls back to MAILROOM_VAULT, then "."
++//   --dry-run       report what would happen, write nothing
++//   --merge <mode>  keep-destination | take-source | compare (default) —
++//                   only relevant if --to already has its own Nest
++pub fn move_branch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
++    let mut from_id: Option<String> = None;
++    let mut to_id: Option<String> = None;
++    let mut vault: Option<PathBuf> = None;
++    let mut dry_run = false;
++    let mut merge_strategy = crate::move_branch::MergeStrategy::Compare;
++
++    let mut i = 0;
++    while i < args.len() {
++        match args[i].as_str() {
++            "--from" => from_id = Some(require_value(args, &mut i, "--from")?),
++            "--to"   => to_id   = Some(require_value(args, &mut i, "--to")?),
++            "--vault" => vault = Some(PathBuf::from(require_value(args, &mut i, "--vault")?)),
++            "--dry-run" => { dry_run = true; i += 1; }
++            "--merge" => {
++                let value = require_value(args, &mut i, "--merge")?;
++                merge_strategy = match value.as_str() {
++                    "keep-destination" => crate::move_branch::MergeStrategy::KeepDestination,
++                    "take-source"      => crate::move_branch::MergeStrategy::TakeSource,
++                    "compare"          => crate::move_branch::MergeStrategy::Compare,
++                    other => {
++                        return Err(format!(
++                            "Unknown --merge value '{other}' — expected keep-destination, take-source, or compare"
++                        ).into());
++                    }
++                };
++            }
++            other => {
++                eprintln!("Unrecognized argument: {other} (ignoring)");
++                i += 1;
++            }
++        }
++    }
++
++    let from_id = from_id.ok_or("missing required --from")?;
++    let to_id = to_id.ok_or("missing required --to")?;
++
++    let vault_root = vault
++        .or_else(|| std::env::var("MAILROOM_VAULT").ok().map(PathBuf::from))
++        .unwrap_or_else(|| PathBuf::from("."));
++
++    let report = crate::move_branch::move_branch(&vault_root, &from_id, &to_id, merge_strategy, dry_run)?;
++
++    if report.merged_into_existing && merge_strategy == crate::move_branch::MergeStrategy::Compare {
++        println!("Destination '{to_id}' already has its own Nest — nothing written.");
++        println!("Differences found:");
++        for diff in &report.manifest_diffs {
++            println!("  {diff}");
++        }
++        println!("Rerun with --merge take-source or --merge keep-destination to proceed.");
++    } else if report.dry_run {
++        println!(
++            "Dry run: would move '{}' -> '{}' ({} -> {})",
++            report.from_id, report.to_id, report.old_path.display(), report.new_path.display()
++        );
++    } else if report.merged_into_existing {
++        println!(
++            "Merged '{}' into existing '{}' at {} (strategy: {:?})",
++            report.from_id, report.to_id, report.new_path.display(), merge_strategy
++        );
++    } else {
++        println!(
++            "Moved '{}' -> '{}' ({} -> {})",
++            report.from_id, report.to_id, report.old_path.display(), report.new_path.display()
++        );
++    }
++
++    for rule in &report.rewired_routing_rules {
++        println!("  rewired [routing] rule for \"{}\" in {}", rule.1, rule.0);
++    }
++    for warning in &report.hardcoded_warnings {
++        println!("\n⚠️  {warning}");
++    }
++
++    Ok(())
++}
++
+ fn parse_kind(raw: &str) -> NodeKind {
+     match raw {
+         "domain" => NodeKind::Domain,
+diff --git a/src/main.rs b/src/main.rs
+--- a/src/main.rs	2026-07-30 21:22:39.000000000 +0000
++++ b/src/main.rs	2026-08-01 21:17:12.372611593 +0000
+@@ -8,6 +8,7 @@
+ mod inference;
+ mod machines;
+ mod manifest;
++mod move_branch;
+ mod nest;
+ mod orchard;
+ mod registry;
+@@ -31,6 +32,9 @@
+     if cli_args.get(1).map(String::as_str) == Some("add-nest") {
+         return cli::add_nest(&cli_args[2..]);
+     }
++    if cli_args.get(1).map(String::as_str) == Some("move-branch") {
++        return cli::move_branch(&cli_args[2..]);
++    }
+ 
+     let vault_root = std::env::var("MAILROOM_VAULT")
+         .unwrap_or_else(|_| "/home/user/vault".to_string());
+diff --git a/src/manifest.rs b/src/manifest.rs
+--- a/src/manifest.rs	2026-07-30 20:05:43.000000000 +0000
++++ b/src/manifest.rs	2026-08-01 21:31:40.082072661 +0000
+@@ -86,6 +86,18 @@
+     // Tags themselves stay a flat, unconstrained Vec<String> on the
+     // Envelope/EntryMeta — this field only documents which ones a given
+     // Nest considers meaningful, per its own internal jurisdiction.
++
++    #[serde(default)]
++    pub call_number: Option<String>,
++    // A classification/sort hint for this specific item — e.g. an LOC
++    // call number ("TP577 .W47 2018") or a UDC decimal. Deliberately
++    // NOT the addressing scheme: child_addressing still derives this
++    // Nest's actual id from content_hash, which is deterministic and
++    // needs no human input. This field is purely for sorting/browsing
++    // later — populated from meta["call_number"] at ingest time if
++    // supplied, otherwise None, left for you to fill in by hand by
++    // editing this book's own nest file directly. No listing endpoint
++    // sorts by this yet — that's separate future work.
+ }
+ impl Manifest {
+     /// Returns the effective path for this node within /storage/Library.
+diff --git a/src/attendant.rs b/src/attendant.rs
+--- a/src/attendant.rs	2026-08-01 05:45:43.000000000 +0000
++++ b/src/attendant.rs	2026-08-01 21:37:23.526167591 +0000
+@@ -60,17 +60,24 @@
+     // A read lock is enough here; we only escalate to a write lock if
+     // we're actually about to mint something new.
+     if let Some(existing) = state.registry.read().await.get(&child_id).cloned() {
++        // A dedup hit means child_id — derived from this content's own
++        // hash — already exists, which by construction means the bytes
++        // are byte-for-byte identical to what's already on disk. There's
++        // no scenario where this branch runs on genuinely different
++        // content. Writing another full copy into entries/ every time
++        // the same file gets resent is pure waste with zero new
++        // information — an early real test surfaced exactly this: three
++        // 11MB copies of the same PDF from three identical uploads.
+         tracing::info!(
+             id       = %envelope.id,
+             child_id = %child_id,
+-            "dedup hit — routing to existing subnest rather than minting"
++            "dedup hit — identical content already stored, skipping redundant write"
+         );
+-        store::store(envelope, &state.library_root, &existing.effective_path()).await?;
+         return Ok(existing);
+     }
+ 
+     // ── Mint a fresh child Nest ──────────────────────────────────────────
+-    let name = child_slug(envelope);
++    let name = child_slug(envelope, &state.title_cleanup);
+ 
+     // effective_path()'s fallback ("{id}_{name}") assumes the node lives
+     // directly under library_root — true for top-level schema-generated
+@@ -100,6 +107,7 @@
+         }),
+         about: None,
+         known_tags: Vec::new(),
++        call_number: envelope.meta.get("call_number").cloned(),
+     };
+ 
+     // create_orchard() already exists and already does exactly this —
+@@ -152,11 +160,44 @@
+ /// A short human-readable slug for the child's folder name — best-effort
+ /// only. Falls back to the envelope id if nothing better is available;
+ /// nothing downstream depends on this being meaningful, just readable.
+-fn child_slug(envelope: &Envelope) -> String {
+-    envelope
++fn child_slug(envelope: &Envelope, cleanup_phrases: &[String]) -> String {
++    let raw = envelope
+         .meta
+         .get("title")
+         .or_else(|| envelope.meta.get("filename"))
+         .cloned()
+-        .unwrap_or_else(|| envelope.id.to_string())
++        .unwrap_or_else(|| envelope.id.to_string());
++    let cleaned = crate::cleanup::clean(&raw, cleanup_phrases);
++    slugify(&cleaned)
++}
++
++/// Filesystem-safe slug: whitespace (and commas) collapse to a single
++/// '-', so "Test Book One" becomes "Test-Book-One" — matching the
++/// hyphen-within/underscore-between convention already used elsewhere
++/// in the JD tree (e.g. "21-D-A_Recurring-expenses"). Characters that
++/// are outright invalid on at least one common filesystem (NTFS/exFAT)
++/// are dropped rather than substituted, so a title like "Frankenstein:
++/// Or, The Modern Prometheus" becomes "Frankenstein-Or-The-Modern-Prometheus"
++/// rather than keeping a bare colon that'd break on Windows/exFAT and
++/// look wrong on macOS.
++///
++/// Also relied on by move_branch.rs, to keep a renamed/reclassified
++/// node's folder name using the same convention as a freshly minted one.
++pub(crate) fn slugify(s: &str) -> String {
++    let mut out = String::with_capacity(s.len());
++    let mut last_was_sep = false;
++    for c in s.trim().chars() {
++        if c.is_whitespace() || c == ',' {
++            if !last_was_sep && !out.is_empty() {
++                out.push('-');
++                last_was_sep = true;
++            }
++        } else if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
++            continue; // drop outright rather than substitute
++        } else {
++            out.push(c);
++            last_was_sep = false;
++        }
++    }
++    out.trim_end_matches('-').to_string()
+ }
+\ No newline at end of file
+diff --git a/src/schema.rs b/src/schema.rs
+--- a/src/schema.rs	2026-07-30 20:10:42.000000000 +0000
++++ b/src/schema.rs	2026-08-01 21:32:07.470130919 +0000
+@@ -34,6 +34,7 @@
+         mailroom: None,
+         about: None,
+         known_tags: Vec::new(), 
++        call_number: None,
+     };
+     Nest {
+         manifest,

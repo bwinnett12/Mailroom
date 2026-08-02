@@ -26,7 +26,7 @@ struct NewEnvelopeTemplate {
 }
 
 pub async fn new_envelope_form(State(state): State<Arc<AppState>>) -> Response {
-    let routes = state.registry.all()
+    let routes = state.registry.read().await.all()
         .into_iter()
         .map(|m| (m.id.clone(), m.name.clone()))
         .collect();
@@ -57,11 +57,13 @@ pub async fn submit(
         payload: Payload::Text(body.content),
         jd_address: Some(body.jd_address.clone()),
         meta: std::collections::HashMap::new(),
+        tags: Vec::new(),
         created_at: None,
     };
     let envelope = inbound.into_envelope();
 
-    let manifest = match state.registry.get(&body.jd_address) {
+    let registry = state.registry.read().await;
+    let manifest = match registry.get(&body.jd_address) {
         Some(m) => m,
         None => return render(SubmitResultTemplate {
             success: false,

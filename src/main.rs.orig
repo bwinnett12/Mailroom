@@ -1,13 +1,11 @@
 // src/main.rs
 
 mod attendant;
-mod cleanup;
 mod cli;
 mod dodo;
 mod envelope;
 mod inference;
 mod machines;
-mod move_branch;
 mod manifest;
 mod nest;
 mod orchard;
@@ -32,9 +30,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if cli_args.get(1).map(String::as_str) == Some("add-nest") {
         return cli::add_nest(&cli_args[2..]);
     }
-   if cli_args.get(1).map(String::as_str) == Some("move-branch") {
-       return cli::move_branch(&cli_args[2..]);
-   }
 
     let vault_root = std::env::var("MAILROOM_VAULT")
         .unwrap_or_else(|_| "/home/user/vault".to_string());
@@ -112,24 +107,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!(nodes = registry.node_count, "registry ready");
 
-    // ── Title cleanup list (optional) ────────────────────────────────────────
-    let title_cleanup = match std::env::var("MAILROOM_TITLE_CLEANUP") {
-        Ok(path) => match cleanup::load(Path::new(&path)) {
-            Ok(phrases) => {
-                tracing::info!(path = %path, count = phrases.len(), "loaded title cleanup list");
-                phrases
-            }
-            Err(e) => {
-                tracing::warn!(path = %path, error = %e, "failed to load title cleanup list — proceeding with none");
-                Vec::new()
-            }
-        },
-        Err(_) => Vec::new(),
-    };
-
     // ── AppState ──────────────────────────────────────────────────────────────
     let state = std::sync::Arc::new(
-        AppState::new(vault_path, library_root, registry, inference, title_cleanup)
+        AppState::new(vault_path, library_root, registry, inference)
     );
 
     // ── Router ────────────────────────────────────────────────────────────────

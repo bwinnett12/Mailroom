@@ -1,0 +1,30 @@
+@@ -29,10 +30,25 @@
+     let addr = std::env::var("MAILROOM_LISTEN")
+         .unwrap_or_else(|_| "0.0.0.0:3000".to_string());
+ 
+-    schema::generate_fresh_tree(
+-       Path::new("schema.ron"),
+-       Path::new("/Users/b/Projects/test-orchard/Orchard"),
+-   )?;
++    // Opt-in, not automatic — see backlog: "Gate generate_fresh_tree's call
++    // in main.rs behind an opt-in flag". generate_fresh_tree() is also not
++    // yet merge-safe (always overwrites), so this stays off by default
++    // even once set up correctly for a real vault, not just to avoid the
++    // previous hardcoded dev-machine path crashing startup on Locomotive.
++    if std::env::var("MAILROOM_GENERATE_SCHEMA").is_ok() {
++        let schema_path = std::env::var("MAILROOM_SCHEMA_PATH")
++            .unwrap_or_else(|_| "schema.ron".to_string());
++        let orchard_root = std::env::var("MAILROOM_ORCHARD_ROOT")
++            .unwrap_or_else(|_| vault_root.clone());
++
++        tracing::warn!(
++            schema = %schema_path,
++            root   = %orchard_root,
++            "MAILROOM_GENERATE_SCHEMA set — regenerating schema tree \
++             (destructive: not yet merge-safe against hand-edited nest files)"
++        );
++        schema::generate_fresh_tree(Path::new(&schema_path), Path::new(&orchard_root))?;
++    }
+ 
+     let inference_config_path = std::env::var("MAILROOM_CONFIG")
+         .unwrap_or_else(|_| "./Mailroom.toml".to_string());
