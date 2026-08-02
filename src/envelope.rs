@@ -106,7 +106,6 @@ pub enum Payload {
 }
 
 // ── Envelope ──────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
     /// Unique identifier for this envelope.

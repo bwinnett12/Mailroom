@@ -346,7 +346,7 @@ fn relative_manifest_path(new_dir: &Path, vault_root: &Path) -> anyhow::Result<O
 /// Walk the vault looking for the nest file whose parsed id matches.
 /// Same tolerance as Registry::load — a bad TOML file elsewhere in the
 /// vault is skipped, not fatal to the search.
-fn find_nest_by_id(vault_root: &Path, id: &str) -> anyhow::Result<Option<(PathBuf, Manifest)>> {
+pub(crate) fn find_nest_by_id(vault_root: &Path, id: &str) -> anyhow::Result<Option<(PathBuf, Manifest)>> {
     for entry in WalkDir::new(vault_root).follow_links(true).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
         if path.file_name().and_then(|n| n.to_str()) != Some("nest") {

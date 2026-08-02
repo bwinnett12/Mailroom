@@ -4,8 +4,8 @@
 <form hx-post="/submit" hx-target="#result" hx-swap="innerHTML">
   <textarea name="content" rows="6" style="width:100%" placeholder="What's on your mind?"></textarea>
   <select name="jd_address">
-    {% for (id, name) in routes %}
-    <option value="{{ id }}">{{ name }} ({{ id }})</option>
+    {% for (id, name, is_rookery) in routes %}
+    <option value="{{ id }}">{{ name }} ({{ id }}){% if is_rookery %} 🪺{% endif %}</option>
     {% endfor %}
   </select>
   <button type="submit">Send</button>
