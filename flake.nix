@@ -136,15 +136,12 @@
     #
     # Import in machines/Locomotive/default.nix:
     #   imports = [ inputs.mailroom.nixosModules.default ];
-    nixosModules.default = { config, lib, pkgs, ... }:
+        nixosModules.default = { config, lib, pkgs, ... }:
     let
       cfg = config.services.mailroom;
-      # Shorthand — cfg.enable instead of config.services.mailroom.enable
     in {
 
       # ── Options ─────────────────────────────────────────────────────────
-      # These become the public interface of the module.
-      # Set them in machines/Locomotive/default.nix.
       options.services.mailroom = {
 
         enable = lib.mkEnableOption "Mailroom personal data routing hub";
@@ -153,8 +150,6 @@
           type        = lib.types.package;
           description = "The mailroom binary to run.";
           default     = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
-          # self = this flake. Pulls the binary built by packages.default above.
-          # hostPlatform.system = the system we're building FOR (aarch64-linux on Pi).
         };
 
         listenAddr = lib.mkOption {
@@ -230,22 +225,38 @@
             Use "mailroom=info" for production.
           '';
         };
+
+        # ── NEW OPTION ───────────────────────────────────────────────────
+        configFile = lib.mkOption {
+          type        = lib.types.nullOr lib.types.path;
+          default     = null;
+          description = ''
+            Path to Mailroom.toml configuration file.
+            If set, Mailroom will load this file instead of relying on 
+            individual MAILROOM_* environment variables.
+            
+            If null, Mailroom falls back to env-var mode and reads:
+              - MAILROOM_LISTEN
+              - MAILROOM_VAULT
+              - MAILROOM_LIBRARY_ROOT
+              - MAILROOM_LLM_URL
+              - MAILROOM_CLASSIFY_MODEL
+              - MAILROOM_SUMMARISE_MODEL
+              - MAILROOM_CHAT_MODEL
+          '';
+        };
       };
 
       # ── Configuration (only active when enable = true) ───────────────────
       config = lib.mkIf cfg.enable {
 
         # ── Create directories ─────────────────────────────────────────────
-        # systemd-tmpfiles runs at boot and creates these if missing.
-        # 'd' = directory, 0750 = rwxr-x---, mailroom:mailroom = ownership
         systemd.tmpfiles.rules = [
           "d ${cfg.vaultPath}   0750 mailroom mailroom -"
           "d ${cfg.libraryRoot} 0750 mailroom mailroom -"
         ];
 
         # ── Service user ───────────────────────────────────────────────────
-        # Dedicated system user — no login shell, least privilege.
-        # The service runs as this user, not root.
         users.users.mailroom = {
           isSystemUser = true;
           group        = "mailroom";
@@ -257,30 +268,31 @@
         systemd.services.mailroom = {
           description = "82_Mailroom — personal data routing hub";
           wantedBy    = [ "multi-user.target" ];
-          # Start automatically when the system reaches multi-user mode.
 
           after = [
             "network.target"
             "tailscaled.service"
-            # Wait for Tailscale before starting — the LLM URL is a
-            # Tailscale address and won't resolve without it.
           ];
 
           wants = [ "tailscaled.service" ];
-          # `wants` is softer than `requires` — if tailscaled fails to
-          # start, mailroom still starts. It'll just fail classification
-          # until Island is reachable, which is the intended behaviour.
 
-          environment = {
-            MAILROOM_LISTEN          = cfg.listenAddr;
-            MAILROOM_VAULT           = cfg.vaultPath;
-            MAILROOM_LIBRARY_ROOT    = cfg.libraryRoot;
-            MAILROOM_LLM_URL         = cfg.llmUrl;
-            MAILROOM_CLASSIFY_MODEL  = cfg.classifyModel;
-            MAILROOM_SUMMARISE_MODEL = cfg.summariseModel;
-            MAILROOM_CHAT_MODEL      = cfg.chatModel;
-            RUST_LOG                 = cfg.logLevel;
-          };
+          # ── Environment variables ──────────────────────────────────────
+          # Merge base env vars with optional MAILROOM_CONFIG if configFile is set
+          environment = 
+            {
+              MAILROOM_LISTEN          = cfg.listenAddr;
+              MAILROOM_VAULT           = cfg.vaultPath;
+              MAILROOM_LIBRARY_ROOT    = cfg.libraryRoot;
+              MAILROOM_LLM_URL         = cfg.llmUrl;
+              MAILROOM_CLASSIFY_MODEL  = cfg.classifyModel;
+              MAILROOM_SUMMARISE_MODEL = cfg.summariseModel;
+              MAILROOM_CHAT_MODEL      = cfg.chatModel;
+              RUST_LOG                 = cfg.logLevel;
+            } // lib.optionalAttrs (cfg.configFile != null) {
+              # ── NEW: Conditionally set MAILROOM_CONFIG ───────────────
+              # Only set if configFile option is not null
+              MAILROOM_CONFIG = cfg.configFile;
+            };
 
           serviceConfig = {
             ExecStart = "${cfg.package}/bin/mailroom";
@@ -290,35 +302,17 @@
             # ── Restart policy ───────────────────────────────────────
             Restart    = "on-failure";
             RestartSec = "5s";
-            # Restart 5 seconds after a crash. Prevents tight crash loops
-            # from hammering the CPU if something is fundamentally wrong.
 
             # ── Hardening ────────────────────────────────────────────
-            # These restrict what the process can do even if compromised.
             NoNewPrivileges = true;
-            # Process cannot gain new capabilities (e.g. via setuid).
-
             ProtectSystem = "strict";
-            # Mounts /usr, /boot, /etc as read-only.
-            # The process can't modify system files.
-
             ProtectHome = true;
-            # /home, /root, /run/user are invisible to the process.
-
             ReadWritePaths = [
               cfg.vaultPath
               cfg.libraryRoot
             ];
-            # Explicitly allow writes only to these directories.
-            # Everything else is read-only or inaccessible.
-
             PrivateTmp = true;
-            # The process gets its own /tmp, isolated from the system.
-
             PrivateDevices = true;
-            # No access to physical devices (cameras, audio, etc.)
-            # The Mailroom receives data over HTTP — it doesn't need
-            # direct device access.
           };
         };
       };

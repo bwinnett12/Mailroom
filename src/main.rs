@@ -2,6 +2,7 @@
 
 mod attendant;
 mod cleanup;
+mod clean_file;
 mod cli;
 mod dodo;
 mod envelope;

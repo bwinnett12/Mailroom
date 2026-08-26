@@ -2,3 +2,50 @@ ffmpeg -i srt://loom.tail4b1127.ts.net:8888 -i srt://loom.tail4b1127.ts.net:8889
   -filter_complex "[0:a][1:a]join=inputs=2:channel_layout=stereo[a]" \
   -map "[a]" -c:a aac output-stereo.aac \
   -t 30 clip-ch1.aac
+
+
+
+
+
+curl http://loom.tail4b1127.ts.net/v1/chat/completions \
+      -H "Content-Type: application/json" \
+      -d '{ "model": "qwen_qwen3.5-0.8b", "messages": [{"role": "user", "content": "How are you doing?", "temperature": 0.1}] }' 
+
+
+
+
+curl http://loom.tail4b1127.ts.net/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen_qwen3.5-0.8b",
+    "messages": [
+      {
+        "role": "user",
+        "content": "What is the weather like in Omaha, Nebraska?"
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_current_weather",
+          "description": "Get the current weather in a given location",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": {
+                "type": "string",
+                "description": "The city and state to get weather for"
+              },
+              "unit": {
+                "type": "string",
+                "enum": ["celsius"]
+              }
+            },
+            "required": ["location"]
+          }
+        }
+      }
+    ],
+    "tool_choice": "auto"
+  }'
