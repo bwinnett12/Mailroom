@@ -92,8 +92,10 @@ impl Registry {
             // entry.path() returns a &Path — a borrowed reference to the path.
             // We don't need to own it here, just inspect it.
 
-            // Check if this entry is a file named exactly "nest"
-            if path.file_name().and_then(|n| n.to_str()) == Some("nest") {
+            // Check if this entry is a file named "nest" or ".mailroom"
+            let file_name = path.file_name().and_then(|n| n.to_str());
+            if file_name == Some("nest") || file_name == Some(".mailroom") {
+                
                 // path.file_name() returns the last component of the path
                 // as an Option<&OsStr>. It's an Option because the path
                 // might end in ".." or be empty.
@@ -140,7 +142,7 @@ impl Registry {
                         tracing::warn!(
                             path  = %path.display(),
                             error = %e,
-                            "failed to parse nest — skipping"
+                            "failed to parse manifest file (nest or .mailroom) — skipping"
                         );
                     }
                 }

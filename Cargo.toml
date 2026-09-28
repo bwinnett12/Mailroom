@@ -19,6 +19,8 @@ tokio = { version = "1.0", features = ["full"] }
 toml    = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["fs", "trace"] }
 uuid   = { version = "1", features = ["v4", "serde"] }
 walkdir = "2"
 

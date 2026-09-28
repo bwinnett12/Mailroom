@@ -32,10 +32,10 @@
           overlays = [ (import rust-overlay) ];
         };
 
-        # Stable Rust with IDE support.
-        # No wasm targets — Mailroom is a server binary only.
+        # Stable Rust with IDE support + WASM target for Leptos.
         rustToolchain = pkgs.rust-bin.stable.latest.default.override {
           extensions = [ "rust-src" "rust-analyzer" ];
+          targets = [ "wasm32-unknown-unknown" ];  # For Leptos WASM frontend
         };
 
         # Dependencies needed to build reqwest with native TLS.
@@ -51,10 +51,9 @@
           # reqwest uses openssl for HTTPS to LocalAI
         ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
           pkgs.libiconv
-          pkgs.libiconv
-          pkgs.apple-sdk_11
-          # macOS requires these frameworks for TLS.
+          # macOS requires libiconv for text encoding.
           # Harmless on Linux — optionals means they're skipped there.
+          # NOTE: apple-sdk_11 was removed in newer Nixpkgs; system SDK is used instead
         ];
 
       in {
@@ -64,7 +63,13 @@
         # All MAILROOM_* env vars are pre-set for local development.
         devShells.default = pkgs.mkShell {
           inherit nativeBuildInputs;
-          buildInputs = [ rustToolchain ] ++ buildInputs;
+          buildInputs = with pkgs; [
+            rustToolchain
+            cargo-leptos          # Leptos dev tool (wasm build runner)
+            cargo-generate        # Scaffold projects from templates
+            trunk                 # WASM bundler used by cargo-leptos
+            binaryen              # Dependency for trunk/wasm-opt
+          ] ++ buildInputs;
 
           shellHook = ''
             export PATH="$PATH:$HOME/.cargo/bin"
@@ -90,10 +95,15 @@
             echo "   Vault:   $MAILROOM_VAULT"
             echo "   Library: $MAILROOM_LIBRARY_ROOT"
             echo ""
-            echo "   cargo run        → start the server"
-            echo "   cargo build      → compile only"
-            echo "   cargo test       → run tests"
-            echo "   cargo clippy     → lint"
+            echo "   Backend:"
+            echo "     cargo run        → start the server"
+            echo "     cargo build      → compile only"
+            echo "     cargo test       → run tests"
+            echo "     cargo clippy     → lint"
+            echo ""
+            echo "   Frontend (Leptos):"
+            echo "     cd mailroom-ui && cargo leptos build"
+            echo "     cargo leptos serve  → dev server with hot reload"
             echo ""
           '';
         };

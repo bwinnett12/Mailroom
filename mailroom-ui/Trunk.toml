@@ -1,0 +1,16 @@
+[build]
+target = "index.html"
+dist = "dist"
+
+[watch]
+ignore = ["target"]
+
+[serve]
+port = 3001
+open = false
+ws_protocol = "ws"
+
+# Disable integrity hashes for dev — they cause MIME type issues
+# with local servers that don't set Content-Type correctly
+[build.env]
+TRUNK_SKIP_INTEGRITY = "true"

@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mailroom</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #f5f5f5;
+        }
+
+        header {
+            background: white;
+            padding: 2rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 0.5rem;
+        }
+
+        header p {
+            color: #666;
+            font-size: 1.1rem;
+        }
+
+        .app-container {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+
+        .graph-and-sidebar {
+            display: flex;
+            flex: 1;
+            gap: 1px;
+            background: white;
+        }
+
+        .graph-section {
+            flex: 1;
+            padding: 2rem;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .graph-section h2 {
+            margin-bottom: 1rem;
+            font-size: 1.5rem;
+        }
+
+        .graph-svg {
+            flex: 1;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background: white;
+        }
+
+        .sidebar {
+            width: 300px;
+            padding: 2rem;
+            background: #fafafa;
+            border-left: 1px solid #ddd;
+            overflow-y: auto;
+        }
+
+        .sidebar h3 {
+            font-size: 1.1rem;
+            margin-bottom: 1rem;
+            color: #333;
+        }
+
+        .node-details {
+            background: white;
+            padding: 1rem;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+        }
+
+        .node-details p {
+            margin-bottom: 0.8rem;
+            font-size: 0.9rem;
+            word-break: break-word;
+        }
+
+        .node-details strong {
+            color: #333;
+            display: block;
+            margin-bottom: 0.2rem;
+        }
+    </style>
+    
+<script type="module">
+import init, * as bindings from '/mailroom-ui-2c02e5b74b608168.js';
+const wasm = await init({ module_or_path: '/mailroom-ui-2c02e5b74b608168_bg.wasm' });
+
+
+window.wasmBindings = bindings;
+
+
+dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
+
+</script>
+<link rel="modulepreload" href="/mailroom-ui-2c02e5b74b608168.js" crossorigin="anonymous" integrity="sha384-uiPX2uDKHT1HdlT74u2WNq4yLaOX57DbVyNnzt8y3II5LJK91B2Z1JKckmD3oKN3"><link rel="preload" href="/mailroom-ui-2c02e5b74b608168_bg.wasm" crossorigin="anonymous" integrity="sha384-PbmlnqgdB5pLaYTOfxHhe3pdfSJKy4mJ86w+SEiSrZenPwISGh86RtH3EDDgM+sp" as="fetch" type="application/wasm"></head>
+<body></body>
+</html>
