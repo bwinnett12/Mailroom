@@ -1,0 +1,64 @@
+# routes.toml — the routing table. Lives at $MAILROOM_VAULT/routes.toml.
+#
+# Three sections:
+#   [dodos.*]  who may act, and the nests each one is allowed to enter
+#   [hops.*]   the hop bank: each step defined once, referenced by name
+#   [[routes]] data_type -> dodo + nest + ordered hop names
+#
+# [defaults].after is appended to every route's hops unless the route sets
+# skip_defaults = true. That's where logging lives, so it isn't repeated.
+#
+# Adding a route is a new [[routes]] entry. Adding a data type never means
+# touching Rust.
+
+[dodos.upkeep-manager]
+home_nest       = "22"
+available_nests = ["22"]
+
+[dodos.scheduler]
+home_nest       = "20-C"
+available_nests = ["20-C"]
+
+[dodos.logger]
+home_nest       = "88"
+available_nests = ["88"]
+
+# ── Hop bank ──────────────────────────────────────────────────────────────────
+# Each entry sets exactly one of: run (script), store (true), log (path).
+
+[hops.format-todo]
+run = "scripts/format-todo"
+
+[hops.format-event]
+run = "scripts/format-event"
+
+[hops.store]
+store = true
+
+[hops.log]
+log = "logs/mailroom.jsonl"
+
+# ── Defaults ──────────────────────────────────────────────────────────────────
+
+[defaults]
+after = ["log"]
+
+# ── Routes ────────────────────────────────────────────────────────────────────
+
+[[routes]]
+data_type = "text/todo"
+dodo      = "upkeep-manager"
+nest      = "22"
+hops      = ["format-todo", "store"]
+
+[[routes]]
+data_type = "text/calendar-event"
+dodo      = "scheduler"
+nest      = "20-C"
+hops      = ["format-event", "store"]
+
+[[routes]]
+data_type = "text/log"
+dodo      = "logger"
+nest      = "88"
+hops      = ["store"]

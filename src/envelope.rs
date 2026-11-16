@@ -163,6 +163,11 @@ pub struct Envelope {
     /// documented by that Nest's own `known_tags`, not enforced here.
     #[serde(default)]
     pub tags: Vec<String>,
+
+    /// The envelope this one was emitted from, when a route's Emit hop
+    /// produced it. None for intake.
+    #[serde(default)]
+    pub caused_by: Option<Uuid>,
 }
 
 /// What a caller sends to POST /envelope.
@@ -200,6 +205,7 @@ impl InboundEnvelope {
             jd_address:  self.jd_address,
             meta:        self.meta,
             tags:        self.tags,
+            caused_by:   None,
             created_at:  self.created_at.unwrap_or(now),
             // Use caller's timestamp if provided, otherwise now.
             received_at: now,
@@ -244,6 +250,7 @@ impl Envelope {
             received_at: now,
             meta:        HashMap::new(),
             tags:        Vec::new(),
+            caused_by:   None,
         }
     }
 

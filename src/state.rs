@@ -198,6 +198,7 @@ pub struct AppState {
     /// Task table and model routing config.
     pub inference: InferenceConfig,
     pub title_cleanup: Vec<String>,
+    pub router: std::sync::Arc<crate::routing::RoutingTable>,
 }
  
 impl AppState {
@@ -207,6 +208,7 @@ impl AppState {
         registry: Registry,
         inference: InferenceConfig,
         title_cleanup: Vec<String>,
+        router: crate::routing::RoutingTable,
     ) -> Self {
         Self {
             vault_root: vault_root.into(),
@@ -214,10 +216,8 @@ impl AppState {
             registry: std::sync::Arc::new(tokio::sync::RwLock::new(registry)),
             http_client: Client::new(),
             inference,
-            title_cleanup, 
-
+            title_cleanup,
+            router: std::sync::Arc::new(router),
         }
     }
 }
- 
-

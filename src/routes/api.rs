@@ -146,3 +146,19 @@ fn find_node_directory(vault_root: &Path, node_id: &str) -> Option<PathBuf> {
     }
     None
 }
+
+pub async fn get_node_file(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path((node_id, filename)): axum::extract::Path<(String, String)>,
+) -> impl IntoResponse {
+    if let Some(dir) = find_node_directory(&state.vault_root, &node_id) {
+        let file_path = dir.join(&filename);
+        // Safety check: ensure the file is inside the node directory
+        if file_path.starts_with(&dir) {
+            if let Ok(content) = fs::read_to_string(file_path) {
+                return (axum::http::StatusCode::OK, content).into_response();
+            }
+        }
+    }
+    (axum::http::StatusCode::NOT_FOUND, "File not found").into_response()
+}

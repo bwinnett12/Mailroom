@@ -13,7 +13,9 @@ pub mod envelope;
 // Rust will look for src/routes/envelope.rs
 pub mod entries;
 pub mod journal;
+pub mod dispatch;
 pub mod web;
+
 
 use std::sync::Arc;
 use axum::{extract::DefaultBodyLimit, routing::{get, post, get_service}, Router, response::IntoResponse};
@@ -42,6 +44,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/registry/graph", get(api::registry_graph))
         .route("/api/registry/{id}/readme", get(api::get_node_readme))
         .route("/api/registry/{id}/files", get(api::list_node_files))
+        .route("/api/registry/{id}/files/{filename}", get(api::get_node_file))
 
         // ── Journal ───────────────────────────────────────────────────
         .route("/journal", post(journal::write))
@@ -50,6 +53,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         // ── Web Forms ─────────────────────────────────────────────────
         .route("/", get(web::new_envelope_form))
         .route("/submit", post(web::submit))
+
+        .route("/dispatch", post(dispatch::dispatch))
 
         // ── Leptos UI (explicit route) ────────────────────────────────
         .route("/ui", get(serve_ui_index))

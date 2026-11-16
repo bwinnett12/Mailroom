@@ -5,6 +5,7 @@ mod cleanup;
 mod clean_file;
 mod cli;
 mod dodo;
+mod event;
 mod envelope;
 mod inference;
 mod machines;
@@ -18,6 +19,7 @@ mod routes;
 mod schema;
 mod state;
 mod store;
+mod routing;
 
 use std::path::{PathBuf, Path};
 use axum::Router;
@@ -129,8 +131,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // ── AppState ──────────────────────────────────────────────────────────────
+    let routing = routing::RoutingTable::load(
+        &vault_path.join("routes.toml"),
+        &vault_path,
+        &registry,
+    )?;
+    tracing::info!(routes = routing.route_count(), "routing table ready");
+
     let state = std::sync::Arc::new(
-        AppState::new(vault_path, library_root, registry, inference, title_cleanup)
+        AppState::new(vault_path, library_root, registry, inference, title_cleanup, routing)
     );
 
     // ── Router ────────────────────────────────────────────────────────────────

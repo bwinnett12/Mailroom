@@ -22,7 +22,8 @@
 //   in order, and different routes have different numbers of stops —
 //   exactly what Vec is for, versus e.g. a fixed-size array.
 
-use crate::envelope::Envelope;
+use crate::envelope::{Envelope, Payload, Source};
+use crate::event::{Channel, Event, EventKind};
 use crate::move_branch::MergeStrategy;
 
 /// A single step within a Stop. One Stop can have several Hops —
@@ -46,6 +47,15 @@ pub enum Hop {
     /// Route::run(); a Route whose Stops include a Store hop but is run
     /// with envelope: None fails clearly rather than silently no-op'ing.
     Store,
+
+    /// Append one JSON line of envelope metadata to a file under the vault.
+    Log { path: std::path::PathBuf },
+
+    /// Turn the preceding RunScript's receipt, a JSON array of items, into
+    /// one envelope per item. The envelopes are kept on Route::emitted for
+    /// the caller to dispatch. Every item is built before any is kept, so
+    /// one malformed item emits nothing.
+    Emit,
 }
 
 /// One Station a Route visits, and what to do once there.
@@ -84,6 +94,11 @@ pub struct Route {
     pub dodo_id: String,
     pub stops: Vec<Stop>,
     pub status: RouteStatus,
+    /// Nests that record this Route's events (see event.rs).
+    pub watchers: Vec<String>,
+    /// Envelopes produced by Emit hops, waiting for the caller to dispatch
+    /// them. Empty until the route has run.
+    pub emitted: Vec<Envelope>,
 }
 
 impl Route {
@@ -94,7 +109,16 @@ impl Route {
             dodo_id: dodo_id.into(),
             stops,
             status: RouteStatus::NotStarted,
+            watchers: Vec::new(),
+            emitted: Vec::new(),
         }
+    }
+
+    /// Nests that record this Route's events — arrivals to their logs/,
+    /// failures to their errors/.
+    pub fn watched_by(mut self, watchers: Vec<String>) -> Self {
+        self.watchers = watchers;
+        self
     }
 
     /// The Stop the Dodo is currently at, if the Route is actually in
@@ -144,6 +168,16 @@ impl Route {
             RouteStatus::Completed | RouteStatus::Failed { .. } => return Ok(()),
         };
 
+        // Every arrival is an event, and each event is caused by the one
+        // before it. The first stop's cause is the intake itself.
+        let envelope_id = envelope.map(|e| e.id);
+        let mut previous_nest = if start_index == 0 {
+            "intake".to_string()
+        } else {
+            self.stops[start_index - 1].nest_id.clone()
+        };
+        let mut last_event: Option<uuid::Uuid> = None;
+
         for stop_index in start_index..self.stops.len() {
             self.status = RouteStatus::InProgress { stop_index };
 
@@ -154,17 +188,54 @@ impl Route {
             // exactly this reason.
             let stop = self.stops[stop_index].clone();
 
-            if let Err(e) = run_stop(&stop, vault_root, envelope).await {
-                self.status = RouteStatus::Failed {
-                    stop_index,
-                    reason: e.to_string(),
-                };
-                return Err(e);
-            }
+            // Recorded before the hops run, so the chain reads in the
+            // order things happened.
+            let arrival = Event::new(
+                &previous_nest, &stop.nest_id, last_event, envelope_id,
+                EventKind::Transition, None,
+            );
+            record_to_watchers(vault_root, &self.watchers, Channel::Logs, &arrival);
+            last_event = Some(arrival.event_id);
+
+            let emitted = match run_stop(&stop, vault_root, envelope).await {
+                Ok(emitted) => emitted,
+                Err(e) => {
+                    let failure = Event::new(
+                        &previous_nest, &stop.nest_id, last_event, envelope_id,
+                        EventKind::Error, Some(e.to_string()),
+                    );
+                    record_to_watchers(vault_root, &self.watchers, Channel::Errors, &failure);
+
+                    self.status = RouteStatus::Failed {
+                        stop_index,
+                        reason: e.to_string(),
+                    };
+                    return Err(e);
+                }
+            };
+            self.emitted.extend(emitted);
+
+            previous_nest = stop.nest_id.clone();
         }
 
         self.status = RouteStatus::Completed;
         Ok(())
+    }
+}
+
+/// Write an event into each watcher nest's channel. A watcher that
+/// doesn't exist is a warning, not a failure of the route.
+fn record_to_watchers(vault_root: &std::path::Path, watchers: &[String], channel: Channel, event: &Event) {
+    for watcher in watchers {
+        match crate::move_branch::find_nest_by_id(vault_root, watcher) {
+            Ok(Some((nest_file, _))) => {
+                if let Some(nest_dir) = nest_file.parent() {
+                    crate::event::record(nest_dir, channel, event);
+                }
+            }
+            Ok(None) => tracing::warn!(watcher = %watcher, "watcher nest not found — event not recorded"),
+            Err(e) => tracing::warn!(watcher = %watcher, error = %e, "could not look up watcher nest"),
+        }
     }
 }
 
@@ -188,16 +259,40 @@ async fn run_stop(
     stop: &Stop,
     vault_root: &std::path::Path,
     envelope: Option<&Envelope>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<Envelope>> {
     let mut current_nest_id = stop.nest_id.clone();
     let mut last_script_output: Option<String> = None;
+    let mut last_receipt: Option<serde_json::Value> = None;
+    let mut emitted: Vec<Envelope> = Vec::new();
 
     for hop in &stop.hops {
         match hop {
             Hop::RunScript { command, args } => {
-                let output = std::process::Command::new(command)
+                use std::io::Write;
+
+                // Contract: the envelope arrives as JSON on stdin (null when
+                // there is none). Stdout is the script's receipt, saved
+                // by a later Log hop. Stderr is shown on failure. The exit
+                // code decides pass or fail.
+                let input = serde_json::to_vec(&envelope)?;
+
+                let mut child = std::process::Command::new(command)
                     .args(args)
-                    .output()?;
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()?;
+
+                // Written from a separate thread so a script that prints a
+                // lot before reading its input cannot deadlock the pipe.
+                let mut stdin = child.stdin.take().expect("stdin was piped");
+                let writer = std::thread::spawn(move || stdin.write_all(&input));
+
+                let output = child.wait_with_output()?;
+                // A script that exits without reading stdin closes the pipe,
+                // so the write may fail. That is not an error by itself:
+                // the exit code below is what decides the outcome.
+                let _ = writer.join();
 
                 if !output.status.success() {
                     anyhow::bail!(
@@ -207,8 +302,26 @@ async fn run_stop(
                     );
                 }
 
-                let stdout = String::from_utf8(output.stdout)?;
-                last_script_output = Some(stdout.trim().to_string());
+                let stdout = String::from_utf8(output.stdout)?.trim().to_string();
+
+                last_receipt = if stdout.is_empty() {
+                    None
+                } else {
+                    match serde_json::from_str::<serde_json::Value>(&stdout) {
+                        Ok(value) => Some(value),
+                        Err(e) => {
+                            tracing::warn!(
+                                script = %command,
+                                error = %e,
+                                "script stdout is not JSON — no receipt recorded"
+                            );
+                            None
+                        }
+                    }
+                };
+
+                // MoveBranch still reads the raw trimmed stdout as a new id.
+                last_script_output = Some(stdout);
             }
 
             Hop::MoveBranch { merge_strategy } => {
@@ -257,10 +370,100 @@ async fn run_stop(
                 // deployment ever needs them to genuinely diverge.
                 crate::store::store(envelope, vault_root, &manifest.effective_path()).await?;
             }
+            Hop::Emit => {
+                let items = last_receipt
+                    .as_ref()
+                    .and_then(|v| v.as_array())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Emit hop needs a preceding RunScript whose stdout is a JSON array of items"
+                        )
+                    })?;
+
+                // Build every envelope before keeping any, so one bad item
+                // emits nothing rather than part of the batch.
+                let built = items
+                    .iter()
+                    .map(|item| envelope_from_item(item, envelope))
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                emitted.extend(built);
+            }
+
+            Hop::Log { path } => {
+                let full = vault_root.join(path);
+                if let Some(parent) = full.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let line = serde_json::json!({
+                    "at": chrono::Utc::now(),
+                    "nest": current_nest_id,
+                    "receipt": last_receipt,
+                    "envelope": envelope.map(|e| serde_json::json!({
+                        "id": e.id,
+                        "data_type": e.data_type,
+                        "source": e.source,
+                        "jd_address": e.jd_address,
+                        "created_at": e.created_at,
+                        "received_at": e.received_at,
+                        "tags": e.tags,
+                        "meta": e.meta,
+                        "caused_by": e.caused_by,
+                    })),
+                });
+                use std::io::Write;
+                let mut file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&full)?;
+                writeln!(file, "{line}")?;
+            }
         }
     }
 
-    Ok(())
+    Ok(emitted)
+}
+
+/// Build one envelope from an item an Emit hop was handed. The item must
+/// name a data_type and carry a payload. jd_address, tags and meta are
+/// optional. `key` becomes meta "item_key", so a re-run can replace the
+/// same item rather than duplicate it.
+fn envelope_from_item(item: &serde_json::Value, parent: Option<&Envelope>) -> anyhow::Result<Envelope> {
+    let data_type = item
+        .get("data_type")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("emitted item has no data_type: {item}"))?;
+
+    let payload: Payload = serde_json::from_value(
+        item.get("payload").cloned().unwrap_or(serde_json::Value::Null),
+    )
+    .map_err(|e| anyhow::anyhow!("emitted item '{data_type}' has an invalid payload: {e}"))?;
+
+    let jd_address = item.get("jd_address").and_then(|v| v.as_str()).map(String::from);
+
+    let mut envelope = Envelope::new(
+        Source::Other("fan-out".to_string()),
+        data_type,
+        payload,
+        jd_address,
+    );
+
+    if let Some(tags) = item.get("tags").and_then(|v| v.as_array()) {
+        envelope.tags = tags.iter().filter_map(|t| t.as_str().map(String::from)).collect();
+    }
+    if let Some(meta) = item.get("meta").and_then(|v| v.as_object()) {
+        for (k, v) in meta {
+            if let Some(s) = v.as_str() {
+                envelope.meta.insert(k.clone(), s.to_string());
+            }
+        }
+    }
+    if let Some(key) = item.get("key").and_then(|v| v.as_str()) {
+        envelope.meta.insert("item_key".to_string(), key.to_string());
+    }
+
+    envelope.caused_by = parent.map(|p| p.id);
+    Ok(envelope)
 }
 
 // ── route.rs tests — REPLACE the existing `mod tests` block at the end
@@ -460,5 +663,178 @@ mod tests {
         let result = route.run(vault.path(), None).await;
         assert!(result.is_err(), "Store hop with no envelope must fail, not silently no-op");
     }
-}
 
+    #[tokio::test]
+    async fn run_script_receives_the_envelope_and_its_receipt_is_logged() {
+        let vault = tempfile::tempdir().unwrap();
+        let envelope = Envelope::new(
+            Source::Manual,
+            "text/todo",
+            Payload::Text("buy milk".to_string()),
+            Some("22"),
+        );
+
+        // The script saves what it received on stdin, then prints a receipt.
+        let stdin_file = vault.path().join("stdin.json");
+        let script = format!(
+            "cat > '{}'; echo '{{\"action\":\"test\",\"status\":\"ok\"}}'",
+            stdin_file.display()
+        );
+
+        let mut route = Route::new(
+            "test-dodo",
+            vec![Stop {
+                nest_id: "22".to_string(),
+                hops: vec![
+                    Hop::RunScript {
+                        command: "sh".to_string(),
+                        args: vec!["-c".to_string(), script],
+                    },
+                    Hop::Log { path: "logs/test.jsonl".into() },
+                ],
+            }],
+        );
+
+        route.run(vault.path(), Some(&envelope)).await.unwrap();
+
+        assert_eq!(route.status, RouteStatus::Completed);
+
+        let received = fs::read_to_string(&stdin_file).unwrap();
+        assert!(
+            received.contains(&envelope.id.to_string()),
+            "script should receive the envelope on stdin, got: {received}"
+        );
+
+        let log = fs::read_to_string(vault.path().join("logs/test.jsonl")).unwrap();
+        assert!(
+            log.contains("\"receipt\":{\"action\":\"test\",\"status\":\"ok\"}"),
+            "log should carry the receipt, got: {log}"
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_hop_turns_a_scripts_array_into_one_envelope_per_item() {
+        let vault = tempfile::tempdir().unwrap();
+        let parent = Envelope::new(
+            Source::Manual,
+            "text/journal",
+            Payload::Text("2026/10/22 lunch and a workout".to_string()),
+            Some("34-B"),
+        );
+
+        let items = r#"[{"data_type":"data/food-intake","payload":{"kind":"text","data":"chicken burrito"},"key":"lunch-1"},{"data_type":"data/weight","payload":{"kind":"json","data":{"lb":180}},"tags":["morning"]}]"#;
+
+        let mut route = Route::new(
+            "test-dodo",
+            vec![Stop {
+                nest_id: "34-B".to_string(),
+                hops: vec![
+                    Hop::RunScript {
+                        command: "sh".to_string(),
+                        args: vec!["-c".to_string(), format!("echo '{items}'")],
+                    },
+                    Hop::Emit,
+                ],
+            }],
+        );
+
+        route.run(vault.path(), Some(&parent)).await.unwrap();
+
+        assert_eq!(route.status, RouteStatus::Completed);
+        assert_eq!(route.emitted.len(), 2);
+        assert_eq!(route.emitted[0].data_type, "data/food-intake");
+        assert_eq!(route.emitted[0].caused_by, Some(parent.id));
+        assert_eq!(route.emitted[0].meta.get("item_key").map(String::as_str), Some("lunch-1"));
+        assert_eq!(route.emitted[1].data_type, "data/weight");
+        assert_eq!(route.emitted[1].tags, vec!["morning".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn one_malformed_item_emits_nothing_and_fails_the_route() {
+        let vault = tempfile::tempdir().unwrap();
+
+        // The second item has no data_type. Nothing from the batch should be
+        // kept, not even the valid first item.
+        let items = r#"[{"data_type":"data/weight","payload":{"kind":"json","data":{"lb":180}}},{"payload":{"kind":"text","data":"no type"}}]"#;
+
+        let mut route = Route::new(
+            "test-dodo",
+            vec![Stop {
+                nest_id: "34-B".to_string(),
+                hops: vec![
+                    Hop::RunScript {
+                        command: "sh".to_string(),
+                        args: vec!["-c".to_string(), format!("echo '{items}'")],
+                    },
+                    Hop::Emit,
+                ],
+            }],
+        );
+
+        assert!(route.run(vault.path(), None).await.is_err());
+        assert!(matches!(route.status, RouteStatus::Failed { .. }));
+        assert!(route.emitted.is_empty(), "a failed batch must emit nothing");
+    }
+
+    fn read_events(path: &Path) -> Vec<serde_json::Value> {
+        fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn each_arrival_is_recorded_to_the_watcher_chained_by_cause() {
+        let vault = tempfile::tempdir().unwrap();
+        seed_nest(vault.path(), "22_upkeep", &test_manifest("22", "upkeep"));
+        seed_nest(vault.path(), "52_media", &test_manifest("52", "media"));
+        seed_nest(vault.path(), "91_Logging", &test_manifest("91", "Logging"));
+
+        let mut route = Route::new(
+            "test-dodo",
+            vec![
+                Stop { nest_id: "22".to_string(), hops: vec![] },
+                Stop { nest_id: "52".to_string(), hops: vec![] },
+            ],
+        )
+        .watched_by(vec!["91".to_string()]);
+
+        route.run(vault.path(), None).await.unwrap();
+
+        let events = read_events(&vault.path().join("91_Logging/logs/events.jsonl"));
+        assert_eq!(events.len(), 2, "one arrival per stop");
+        assert_eq!(events[0]["from"], "intake");
+        assert_eq!(events[0]["to"], "22");
+        assert_eq!(events[0]["kind"], "transition");
+        assert_eq!(events[1]["from"], "22");
+        assert_eq!(events[1]["to"], "52");
+        assert_eq!(events[1]["caused_by"], events[0]["event_id"]);
+    }
+
+    #[tokio::test]
+    async fn a_failing_stop_is_recorded_to_the_watchers_errors_channel() {
+        let vault = tempfile::tempdir().unwrap();
+        seed_nest(vault.path(), "91_Logging", &test_manifest("91", "Logging"));
+
+        let mut route = Route::new(
+            "test-dodo",
+            vec![Stop {
+                nest_id: "22".to_string(),
+                hops: vec![Hop::RunScript { command: "false".to_string(), args: vec![] }],
+            }],
+        )
+        .watched_by(vec!["91".to_string()]);
+
+        assert!(route.run(vault.path(), None).await.is_err());
+
+        let arrivals = read_events(&vault.path().join("91_Logging/logs/events.jsonl"));
+        assert_eq!(arrivals.len(), 1, "the arrival is still logged");
+
+        let errors = read_events(&vault.path().join("91_Logging/errors/events.jsonl"));
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0]["kind"], "error");
+        assert_eq!(errors[0]["to"], "22");
+        assert_eq!(errors[0]["caused_by"], arrivals[0]["event_id"]);
+    }
+}
