@@ -9,6 +9,7 @@ mod envelope;
 mod event;
 mod inference;
 mod ledger;
+mod blobs;
 mod machines;
 mod manifest;
 mod move_branch;

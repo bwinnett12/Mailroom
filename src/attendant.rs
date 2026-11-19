@@ -141,9 +141,12 @@ pub async fn intake(
     Ok(child_manifest)
 }
 
-/// content_hash addressing: `{gate_id}-{first 8 hex chars of the sha256}`.
-/// Same truncation precedent as store.rs's own filename short-ids —
-/// not a new convention, just applied to addressing instead of filenames.
+/// content_hash addressing: `{gate_id}-{first 16 hex chars of the sha256}`.
+/// 16 hex chars = 64 bits. With 8 (32 bits), the chance of two items in
+/// one gate colliding passes 1% around 9,300 items and 50% around 77,000;
+/// with 16 it stays below one in a million past 6 million items. Ids
+/// already issued with 8 chars stay valid: an id is read from its nest
+/// file, never re-derived.
 async fn content_hash_child_id(gate: &Manifest, envelope: &Envelope) -> anyhow::Result<String> {
     let hash = store::compute_content_hash(&envelope.payload)
         .await?
@@ -154,7 +157,7 @@ async fn content_hash_child_id(gate: &Manifest, envelope: &Envelope) -> anyhow::
             )
         })?;
 
-    Ok(format!("{}-{}", gate.id, &hash[..8]))
+    Ok(format!("{}-{}", gate.id, &hash[..16]))
 }
 
 /// A short human-readable slug for the child's folder name — best-effort

@@ -404,17 +404,27 @@ async fn run_stop(
                 // already does for the same reason (a nest's id is the
                 // only thing guaranteed stable; its physical location
                 // can change).
-                let (_, manifest) = crate::move_branch::find_nest_by_id(vault_root, &current_nest_id)?
+                let (nest_file, _) = crate::move_branch::find_nest_by_id(vault_root, &current_nest_id)?
                     .ok_or_else(|| {
                         anyhow::anyhow!("Store hop: no nest found with id '{current_nest_id}'")
                     })?;
 
-                // vault_root doubles as library_root here — every test
-                // and every real run this session has used the same
-                // path for both; see the known caveat already flagged
-                // elsewhere (attendant.rs/move_branch.rs) if a real
-                // deployment ever needs them to genuinely diverge.
-                crate::store::store(envelope, vault_root, &manifest.effective_path()).await?;
+                // Store into the folder the nest file is actually in.
+                // manifest.effective_path() is a name built from id + name
+                // ("52-H_books"); it only matches the real folder when the
+                // nest sits at the top of the vault, so a nest at
+                // 52_media/52-H_books would get a stray 52-H_books/ at the
+                // vault root.
+                let nest_dir = nest_file.parent().unwrap_or(vault_root);
+                let rel = nest_dir
+                    .strip_prefix(vault_root)
+                    .map_err(|_| anyhow::anyhow!("nest {} is outside the vault", nest_dir.display()))?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+
+                // vault_root doubles as library_root here, so blobs for
+                // route-stored files land in <vault>/by-hash/.
+                crate::store::store(envelope, vault_root, &rel).await?;
             }
             Hop::Emit => {
                 let items = last_receipt

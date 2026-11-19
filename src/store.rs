@@ -219,14 +219,31 @@ pub async fn store(
     let content_path = entries_dir.join(&content_filename);
     let meta_path    = entries_dir.join(&meta_filename);
 
-    // ── Write content file ────────────────────────────────────────────────────
-    write_payload(&envelope.payload, &content_path).await?;
     // Reuse the hash the route already computed; only hash here for
     // callers that store an envelope without running a route.
     let content_hash = match &envelope.content_hash {
         Some(hash) => Some(hash.clone()),
         None => compute_content_hash(&envelope.payload).await?,
     };
+
+    // ── Write content file ────────────────────────────────────────────────────
+    match &envelope.payload {
+        Payload::FilePath(src_path) => {
+            // The file itself goes into the blob store under its hash; the
+            // nest gets a small .ref saying which blob. See blobs.rs.
+            let hash = content_hash.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("a file payload always has a content hash")
+            })?;
+            let blob = crate::blobs::put(library_root, src_path, hash).await?;
+            let reference = format!(
+                "ref: {}\noriginal: {}\n",
+                blob.display(),
+                src_path.display()
+            );
+            fs::write(&content_path, reference).await?;
+        }
+        _ => write_payload(&envelope.payload, &content_path).await?,
+    }
 
     // ── Write meta sidecar ────────────────────────────────────────────────────
     let meta = EntryMeta::from_envelope(envelope, &content_filename, content_hash);
@@ -297,17 +314,11 @@ async fn write_payload(payload: &Payload, path: &Path) -> anyhow::Result<()> {
             // Vec<u8> writes directly as raw bytes.
         }
 
-        Payload::FilePath(src_path) => {
-            // For file references we write the path as text — we don't
-            // copy the file. Large files (audio, video) stay where they are.
-            // The .ref file is a pointer, not a copy.
-            let content = format!(
-                "ref: {}\n",
-                src_path.display()
-                // .display() formats a PathBuf for human-readable output.
-                // Handles platform path separators correctly.
-            );
-            fs::write(path, content).await?;
+        Payload::FilePath(_) => {
+            // Files go through blobs::put in store(); a .ref is written
+            // there. Reaching this arm would mean storing a pointer to a
+            // file that may move, which is what the blob store replaced.
+            anyhow::bail!("file payloads are stored through blobs::put, not write_payload");
         }
 
         Payload::Url(url) => {
