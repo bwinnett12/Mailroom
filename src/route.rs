@@ -168,6 +168,27 @@ impl Route {
             RouteStatus::Completed | RouteStatus::Failed { .. } => return Ok(()),
         };
 
+        // Write order, per stop (this is what makes the ledger a
+        // write-ahead log):
+        //   1. append the arrival to the ledger and fsync
+        //   2. run the hops
+        //   3. append Completed (or Error) to the ledger and fsync
+        // If the process dies between 1 and 3, the next startup finds an
+        // arrival with nothing after it and records it as Interrupted
+        // (ledger::Ledger::recover). If step 1 itself fails, no hop runs.
+        let ledger = crate::ledger::for_vault(vault_root)?;
+
+        // Which bytes this route is carrying. Hashed once here (a book is
+        // read once, not once per stop) unless intake already did it.
+        let content_hash = match envelope {
+            Some(e) => match &e.content_hash {
+                Some(hash) => Some(hash.clone()),
+                None => crate::store::compute_content_hash(&e.payload).await?,
+            },
+            None => None,
+        };
+        let envelope_parent = envelope.and_then(|e| e.caused_by);
+
         // Every arrival is an event, and each event is caused by the one
         // before it. The first stop's cause is the intake itself.
         let envelope_id = envelope.map(|e| e.id);
@@ -193,7 +214,12 @@ impl Route {
             let arrival = Event::new(
                 &previous_nest, &stop.nest_id, last_event, envelope_id,
                 EventKind::Transition, None,
-            );
+            )
+            .about(content_hash.clone(), envelope_parent);
+            if let Err(e) = ledger.append(arrival.clone()) {
+                self.status = RouteStatus::Failed { stop_index, reason: e.to_string() };
+                return Err(e);
+            }
             record_to_watchers(vault_root, &self.watchers, Channel::Logs, &arrival);
             last_event = Some(arrival.event_id);
 
@@ -203,7 +229,14 @@ impl Route {
                     let failure = Event::new(
                         &previous_nest, &stop.nest_id, last_event, envelope_id,
                         EventKind::Error, Some(e.to_string()),
-                    );
+                    )
+                    .about(content_hash.clone(), envelope_parent);
+                    // The route has already failed; if recording that also
+                    // fails, report the original error. Startup recovery
+                    // will mark the stop Interrupted.
+                    if let Err(le) = ledger.append(failure.clone()) {
+                        tracing::error!(error = %le, "could not record a failed stop in the ledger");
+                    }
                     record_to_watchers(vault_root, &self.watchers, Channel::Errors, &failure);
 
                     self.status = RouteStatus::Failed {
@@ -213,6 +246,19 @@ impl Route {
                     return Err(e);
                 }
             };
+
+            // Completion goes to the ledger only. The per-nest views keep
+            // showing arrivals and errors, as before.
+            let completed = Event::new(
+                &stop.nest_id, &stop.nest_id, Some(arrival.event_id), envelope_id,
+                EventKind::Completed, None,
+            )
+            .about(content_hash.clone(), envelope_parent);
+            if let Err(e) = ledger.append(completed) {
+                let reason = format!("stop ran, but its completion could not be recorded: {e}");
+                self.status = RouteStatus::Failed { stop_index, reason: reason.clone() };
+                return Err(anyhow::anyhow!(reason));
+            }
             self.emitted.extend(emitted);
 
             previous_nest = stop.nest_id.clone();

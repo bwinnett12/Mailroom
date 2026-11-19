@@ -30,8 +30,21 @@ pub async fn dispatch(
     State(state): State<Arc<AppState>>,
     Json(inbound): Json<InboundEnvelope>,
 ) -> impl IntoResponse {
-    let envelope = inbound.into_envelope();
+    let mut envelope = inbound.into_envelope();
     let envelope_id = envelope.id;
+
+    // Hash at intake, so the hash is fixed before any hop can touch the
+    // content, and every ledger event for this envelope carries it.
+    envelope.content_hash = match crate::store::compute_content_hash(&envelope.payload).await {
+        Ok(hash) => hash,
+        Err(e) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": format!("could not read the payload to hash it: {e}") })),
+            )
+                .into_response();
+        }
+    };
 
     let Some((dodo, resolved)) = state.router.resolve(&envelope.data_type) else {
         return (
@@ -69,6 +82,7 @@ pub async fn dispatch(
         StatusCode::CREATED,
         Json(json!({
             "envelope_id": envelope_id,
+            "content_hash": envelope.content_hash,
             "dodo": dodo.id,
             "nest": resolved.nest_id,
             "status": format!("{:?}", route.status),

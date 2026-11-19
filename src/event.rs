@@ -8,24 +8,33 @@
 // Each nest has two channels for what it hears about:
 //   logs/    arrivals (transitions) — what happened
 //   errors/  failures — what went wrong, and where
-// Recording is best-effort: a watcher that cannot write a record logs a
-// warning rather than failing the route that produced the event.
+// Recording here is best-effort: a watcher that cannot write a record logs
+// a warning rather than failing the route that produced the event. These
+// per-nest files are views. The record of truth is the vault's ledger
+// (ledger.rs), and a failed ledger append does fail the route.
 
 use std::io::Write;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
+    /// A Dodo arrived at a stop. Recorded before the stop's hops run.
     Transition,
+    /// Every hop at the stop succeeded. caused_by is the arrival.
+    Completed,
+    /// A hop at the stop failed. caused_by is the arrival.
     Error,
+    /// Found at startup: the arrival was recorded, but neither Completed
+    /// nor Error ever followed. caused_by is the arrival.
+    Interrupted,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
     pub event_id: Uuid,
     pub from: String,
@@ -35,6 +44,14 @@ pub struct Event {
     pub kind: EventKind,
     pub at: DateTime<Utc>,
     pub detail: Option<String>,
+    /// SHA-256 of the envelope's content (see store::compute_content_hash).
+    /// The envelope id says which record; this says which bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
+    /// The envelope this event's envelope was emitted from (fan-out).
+    /// caused_by links events within one route; this links routes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub envelope_parent: Option<Uuid>,
 }
 
 impl Event {
@@ -55,7 +72,16 @@ impl Event {
             kind,
             at: Utc::now(),
             detail,
+            content_hash: None,
+            envelope_parent: None,
         }
+    }
+
+    /// Attach what is known about the envelope this event concerns.
+    pub fn about(mut self, content_hash: Option<String>, envelope_parent: Option<Uuid>) -> Self {
+        self.content_hash = content_hash;
+        self.envelope_parent = envelope_parent;
+        self
     }
 }
 

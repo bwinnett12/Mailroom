@@ -168,6 +168,13 @@ pub struct Envelope {
     /// produced it. None for intake.
     #[serde(default)]
     pub caused_by: Option<Uuid>,
+
+    /// SHA-256 of the payload's content, hex. Set once, when the envelope
+    /// first enters a route, and carried on every ledger event about it.
+    /// None until then, and always None for a Url payload (nothing local
+    /// to hash).
+    #[serde(default)]
+    pub content_hash: Option<String>,
 }
 
 /// What a caller sends to POST /envelope.
@@ -206,6 +213,7 @@ impl InboundEnvelope {
             meta:        self.meta,
             tags:        self.tags,
             caused_by:   None,
+            content_hash: None,
             created_at:  self.created_at.unwrap_or(now),
             // Use caller's timestamp if provided, otherwise now.
             received_at: now,
@@ -251,6 +259,7 @@ impl Envelope {
             meta:        HashMap::new(),
             tags:        Vec::new(),
             caused_by:   None,
+            content_hash: None,
         }
     }
 

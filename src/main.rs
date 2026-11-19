@@ -1,31 +1,35 @@
 // src/main.rs
 
 mod attendant;
-mod cleanup;
 mod clean_file;
+mod cleanup;
 mod cli;
 mod dodo;
-mod event;
 mod envelope;
+mod event;
 mod inference;
+mod ledger;
 mod machines;
-mod move_branch;
 mod manifest;
+mod move_branch;
 mod nest;
 mod orchard;
 mod registry;
 mod route;
 mod routes;
+mod routing;
 mod schema;
 mod state;
 mod store;
-mod routing;
 
-use std::path::{PathBuf, Path};
+#[cfg(test)]
+mod route_ledger_tests;
+
 use axum::Router;
-use ron;
 use registry::Registry;
+use ron;
 use state::{AppState, InferenceConfig};
+use std::path::{Path, PathBuf};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -35,32 +39,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if cli_args.get(1).map(String::as_str) == Some("add-nest") {
         return cli::add_nest(&cli_args[2..]);
     }
-   if cli_args.get(1).map(String::as_str) == Some("move-branch") {
-       return cli::move_branch(&cli_args[2..]);
-   }
+    if cli_args.get(1).map(String::as_str) == Some("move-branch") {
+        return cli::move_branch(&cli_args[2..]);
+    }
 
-    let vault_root = std::env::var("MAILROOM_VAULT")
-        .unwrap_or_else(|_| "/home/user/vault".to_string());
+    let vault_root =
+        std::env::var("MAILROOM_VAULT").unwrap_or_else(|_| "/home/user/vault".to_string());
 
-    let addr = std::env::var("MAILROOM_LISTEN")
-        .unwrap_or_else(|_| "0.0.0.0:3000".to_string());
-
+    let addr = std::env::var("MAILROOM_LISTEN").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
 
     if std::env::var("MAILROOM_GENERATE_SCHEMA").is_ok() {
         let schema_path = std::env::var("MAILROOM_SCHEMA_PATH")
             .unwrap_or_else(|_| format!("{}/schema.ron", vault_root));
 
-        schema::generate_fresh_tree(
-            Path::new(&schema_path),
-            Path::new(&vault_root),
-        )?;
+        schema::generate_fresh_tree(Path::new(&schema_path), Path::new(&vault_root))?;
     }
     if cli_args.get(1).map(String::as_str) == Some("refresh-schema") {
         return cli::refresh_schema(&cli_args[2..]);
     }
 
-    let inference_config_path = std::env::var("MAILROOM_CONFIG")
-        .unwrap_or_else(|_| "./Mailroom.toml".to_string());
+    let inference_config_path =
+        std::env::var("MAILROOM_CONFIG").unwrap_or_else(|_| "./Mailroom.toml".to_string());
     let inference_config_path = PathBuf::from(inference_config_path);
 
     let inference = if inference_config_path.exists() {
@@ -94,11 +93,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         InferenceConfig::from_env_defaults()
     };
 
-    let library_root = std::env::var("MAILROOM_LIBRARY_ROOT")
-        .unwrap_or_else(|_| {
-            // Default: a Library/ directory next to the vault
-            format!("{}/Library", vault_root)
-        });
+    let library_root = std::env::var("MAILROOM_LIBRARY_ROOT").unwrap_or_else(|_| {
+        // Default: a Library/ directory next to the vault
+        format!("{}/Library", vault_root)
+    });
 
     let vault_path = PathBuf::from(&vault_root);
 
@@ -131,16 +129,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // ── AppState ──────────────────────────────────────────────────────────────
-    let routing = routing::RoutingTable::load(
-        &vault_path.join("routes.toml"),
-        &vault_path,
-        &registry,
-    )?;
+    let routing =
+        routing::RoutingTable::load(&vault_path.join("routes.toml"), &vault_path, &registry)?;
     tracing::info!(routes = routing.route_count(), "routing table ready");
 
-    let state = std::sync::Arc::new(
-        AppState::new(vault_path, library_root, registry, inference, title_cleanup, routing)
-    );
+    // ── Ledger ────────────────────────────────────────────────────────────────
+    // Opened before serving: this takes the vault's lock (a second Mailroom
+    // on the same vault stops here), repairs a torn final line, and records
+    // any stop a crash cut off. Nothing is in flight yet, so the scan is exact.
+    if vault_path.exists() {
+        let ledger = ledger::for_vault(&vault_path)?;
+        let health = ledger.recover()?;
+        tracing::info!(
+            ledger = %ledger.path().display(),
+            records = health.records,
+            interrupted = health.interrupted.len(),
+            dangling_causes = health.dangling_causes.len(),
+            dangling_parents = health.dangling_parents.len(),
+            "ledger ready"
+        );
+    }
+
+    let state = std::sync::Arc::new(AppState::new(
+        vault_path,
+        library_root,
+        registry,
+        inference,
+        title_cleanup,
+        routing,
+    ));
 
     // ── Router ────────────────────────────────────────────────────────────────
     let app = routes::router(state);

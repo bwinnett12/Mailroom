@@ -221,7 +221,12 @@ pub async fn store(
 
     // ── Write content file ────────────────────────────────────────────────────
     write_payload(&envelope.payload, &content_path).await?;
-    let content_hash = compute_content_hash(&envelope.payload).await?;
+    // Reuse the hash the route already computed; only hash here for
+    // callers that store an envelope without running a route.
+    let content_hash = match &envelope.content_hash {
+        Some(hash) => Some(hash.clone()),
+        None => compute_content_hash(&envelope.payload).await?,
+    };
 
     // ── Write meta sidecar ────────────────────────────────────────────────────
     let meta = EntryMeta::from_envelope(envelope, &content_filename, content_hash);
