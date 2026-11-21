@@ -56,6 +56,10 @@ pub enum Hop {
     /// the caller to dispatch. Every item is built before any is kept, so
     /// one malformed item emits nothing.
     Emit,
+
+    /// Write one Linked event to the ledger for each link the envelope
+    /// declares (Envelope::links). This is how edges get into the graph.
+    Link,
 }
 
 /// One Station a Route visits, and what to do once there.
@@ -189,6 +193,24 @@ impl Route {
         };
         let envelope_parent = envelope.and_then(|e| e.caused_by);
 
+        // A new envelope becomes a node in the graph. Record what it is
+        // once, before its first stop. A resumed route has already done
+        // this, so it skips it.
+        if start_index == 0 {
+            if let Some(e) = envelope {
+                let first_nest = self.stops.first().map(|s| s.nest_id.as_str()).unwrap_or("intake");
+                let mut received = Event::new(
+                    "intake", first_nest, None, Some(e.id), EventKind::Received, None,
+                )
+                .about(content_hash.clone(), envelope_parent);
+                received.envelope = Some(crate::event::EnvelopeFacts::of(e));
+                if let Err(err) = ledger.append(received) {
+                    self.status = RouteStatus::Failed { stop_index: 0, reason: err.to_string() };
+                    return Err(err);
+                }
+            }
+        }
+
         // Every arrival is an event, and each event is caused by the one
         // before it. The first stop's cause is the intake itself.
         let envelope_id = envelope.map(|e| e.id);
@@ -301,6 +323,25 @@ fn record_to_watchers(vault_root: &std::path::Path, watchers: &[String], channel
 ///   be just the new id, nothing else) reaches the MoveBranch Hop that
 ///   follows it — None until a RunScript Hop has actually produced
 ///   something.
+/// Normalise and check one declared link.
+///   label: "about", "taken at", "Part-Of" -> ABOUT, TAKEN_AT, PART_OF
+///   to:    a UUID becomes "env:<uuid>"; anything else is a key, as given
+fn link_facts(from: &str, link: &crate::envelope::LinkSpec) -> anyhow::Result<crate::event::LinkFacts> {
+    let label = link.label.trim().to_uppercase().replace([' ', '-'], "_");
+    if label.is_empty() || !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        anyhow::bail!("link label {:?} must be letters, digits and underscores (e.g. ABOUT, TAKEN_AT)", link.label);
+    }
+    let to = link.to.trim();
+    if to.is_empty() {
+        anyhow::bail!("link {label} has an empty target");
+    }
+    let to = match uuid::Uuid::parse_str(to) {
+        Ok(id) => format!("env:{id}"),
+        Err(_) => to.to_string(),
+    };
+    Ok(crate::event::LinkFacts { from: from.to_string(), label, to })
+}
+
 async fn run_stop(
     stop: &Stop,
     vault_root: &std::path::Path,
@@ -425,6 +466,29 @@ async fn run_stop(
                 // vault_root doubles as library_root here, so blobs for
                 // route-stored files land in <vault>/by-hash/.
                 crate::store::store(envelope, vault_root, &rel).await?;
+            }
+            Hop::Link => {
+                let envelope = envelope.ok_or_else(|| {
+                    anyhow::anyhow!("Link hop needs an envelope whose links to record, but this Route was run with envelope: None")
+                })?;
+                // Check every link before writing any, so one bad link
+                // records nothing rather than part of the set.
+                let from = envelope.node_id();
+                let links = envelope
+                    .links
+                    .iter()
+                    .map(|l| link_facts(&from, l))
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                let ledger = crate::ledger::for_vault(vault_root)?;
+                for link in links {
+                    let mut event = Event::new(
+                        &current_nest_id, &current_nest_id, None, Some(envelope.id),
+                        EventKind::Linked, None,
+                    )
+                    .about(envelope.content_hash.clone(), envelope.caused_by);
+                    event.link = Some(link);
+                    ledger.append(event)?;
+                }
             }
             Hop::Emit => {
                 let items = last_receipt

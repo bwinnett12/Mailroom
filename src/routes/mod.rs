@@ -14,6 +14,7 @@ pub mod envelope;
 pub mod entries;
 pub mod journal;
 pub mod dispatch;
+pub mod graph;
 pub mod web;
 
 
@@ -63,6 +64,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .fallback_service(ServeDir::new("mailroom-ui/dist").precompressed_gzip())
 
         // ── Attach state ──────────────────────────────────────────────
+        .merge(graph::routes())
         .with_state(state)
 }
 

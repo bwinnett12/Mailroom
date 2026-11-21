@@ -76,16 +76,17 @@ struct HopDef {
     store: Option<bool>,
     log: Option<String>,
     emit: Option<bool>,
+    link: Option<bool>,
 }
 
 impl HopDef {
     fn to_hop(&self, name: &str, vault_root: &Path) -> anyhow::Result<Hop> {
-        let set = [self.run.is_some(), self.store.is_some(), self.log.is_some(), self.emit.is_some()]
+        let set = [self.run.is_some(), self.store.is_some(), self.log.is_some(), self.emit.is_some(), self.link.is_some()]
             .iter()
             .filter(|b| **b)
             .count();
         if set != 1 {
-            bail!("hop '{name}' must set exactly one of run, store, log, emit (sets {set})");
+            bail!("hop '{name}' must set exactly one of run, store, log, emit, link (sets {set})");
         }
 
         if let Some(command) = &self.run {
@@ -105,6 +106,13 @@ impl HopDef {
 
         if self.emit == Some(true) {
             return Ok(Hop::Emit);
+        }
+
+        if let Some(link) = self.link {
+            if !link {
+                bail!("hop '{name}': link must be true when set");
+            }
+            return Ok(Hop::Link);
         }
 
         if self.store != Some(true) {

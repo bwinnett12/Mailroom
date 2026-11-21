@@ -26,11 +26,23 @@ use crate::{envelope::{Envelope, InboundEnvelope}, state::AppState};
 /// of the POSTed envelope are depth 1; their children depth 2; and so on.
 const MAX_FANOUT_DEPTH: u8 = 3;
 
+/// POST /dispatch body: an InboundEnvelope plus, optionally, the links it
+/// declares. Kept beside InboundEnvelope rather than inside it, so code
+/// that builds an InboundEnvelope by hand doesn't need to change.
+#[derive(serde::Deserialize)]
+pub struct DispatchRequest {
+    #[serde(flatten)]
+    envelope: InboundEnvelope,
+    #[serde(default)]
+    links: Vec<crate::envelope::LinkSpec>,
+}
+
 pub async fn dispatch(
     State(state): State<Arc<AppState>>,
-    Json(inbound): Json<InboundEnvelope>,
+    Json(request): Json<DispatchRequest>,
 ) -> impl IntoResponse {
-    let mut envelope = inbound.into_envelope();
+    let mut envelope = request.envelope.into_envelope();
+    envelope.links = request.links;
     let envelope_id = envelope.id;
 
     // Hash at intake, so the hash is fixed before any hop can touch the

@@ -1,15 +1,16 @@
 // src/main.rs
 
 mod attendant;
+mod blobs;
 mod clean_file;
 mod cleanup;
 mod cli;
 mod dodo;
 mod envelope;
 mod event;
+mod graph;
 mod inference;
 mod ledger;
-mod blobs;
 mod machines;
 mod manifest;
 mod move_branch;

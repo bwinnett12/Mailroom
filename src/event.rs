@@ -32,6 +32,44 @@ pub enum EventKind {
     /// Found at startup: the arrival was recorded, but neither Completed
     /// nor Error ever followed. caused_by is the arrival.
     Interrupted,
+    /// A new envelope entered a route. Carries `envelope`: the facts that
+    /// make it a node in the graph. Written once, before the first stop.
+    Received,
+    /// A Link hop recorded one edge. Carries `link`.
+    Linked,
+}
+
+/// What the graph needs to know about an envelope to make it a node.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EnvelopeFacts {
+    /// The envelope's node id (see Envelope::node_id).
+    pub node: String,
+    pub data_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl EnvelopeFacts {
+    pub fn of(envelope: &crate::envelope::Envelope) -> Self {
+        EnvelopeFacts {
+            node: envelope.node_id(),
+            data_type: envelope.data_type.clone(),
+            title: envelope.meta.get("title").cloned(),
+            tags: envelope.tags.clone(),
+            created_at: envelope.created_at,
+        }
+    }
+}
+
+/// One edge, as recorded by a Link hop.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LinkFacts {
+    pub from: String,
+    pub label: String,
+    pub to: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +90,12 @@ pub struct Event {
     /// caused_by links events within one route; this links routes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub envelope_parent: Option<Uuid>,
+    /// Set on Received events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub envelope: Option<EnvelopeFacts>,
+    /// Set on Linked events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<LinkFacts>,
 }
 
 impl Event {
@@ -74,6 +118,8 @@ impl Event {
             detail,
             content_hash: None,
             envelope_parent: None,
+            envelope: None,
+            link: None,
         }
     }
 

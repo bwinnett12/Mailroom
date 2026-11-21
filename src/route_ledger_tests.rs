@@ -17,7 +17,7 @@ fn ledger_records(vault: &Path) -> Vec<crate::ledger::Record> {
 // sha256("hello") is a published test vector:
 // 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
 #[tokio::test]
-async fn the_ledger_records_arrival_then_completion_carrying_the_content_hash() {
+async fn the_ledger_records_received_arrival_then_completion_carrying_the_content_hash() {
     let vault = tempfile::tempdir().unwrap();
     let envelope = Envelope::new(
         Source::Manual,
@@ -37,14 +37,22 @@ async fn the_ledger_records_arrival_then_completion_carrying_the_content_hash() 
 
     let r = ledger_records(vault.path());
     let hello = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
-    assert_eq!(r.len(), 2);
-    assert_eq!((r[0].seq, r[0].event.kind), (1, EventKind::Transition));
-    assert_eq!((r[1].seq, r[1].event.kind), (2, EventKind::Completed));
+    assert_eq!(r.len(), 3);
+    assert_eq!((r[0].seq, r[0].event.kind), (1, EventKind::Received));
+    assert_eq!((r[1].seq, r[1].event.kind), (2, EventKind::Transition));
+    assert_eq!((r[2].seq, r[2].event.kind), (3, EventKind::Completed));
     assert_eq!(
-        r[1].event.caused_by,
-        Some(r[0].event.event_id),
+        r[2].event.caused_by,
+        Some(r[1].event.event_id),
         "completion points at its arrival"
     );
+    let facts = r[0]
+        .event
+        .envelope
+        .as_ref()
+        .expect("Received carries the envelope's facts");
+    assert_eq!(facts.node, format!("env:{}", envelope.id));
+    assert_eq!(facts.data_type, "text/note");
     for rec in &r {
         assert_eq!(rec.event.envelope_id, Some(envelope.id));
         assert_eq!(rec.event.content_hash.as_deref(), Some(hello));
@@ -129,15 +137,15 @@ async fn an_emitted_childs_events_name_the_parent_envelope() {
     let r = ledger_records(vault.path());
     assert_eq!(
         r.len(),
-        4,
-        "parent arrival + completion, child arrival + completion"
+        6,
+        "for each of parent and child: received, arrival, completion"
     );
-    assert!(r[..2].iter().all(|x| x.event.envelope_parent.is_none()));
-    assert!(r[2..]
+    assert!(r[..3].iter().all(|x| x.event.envelope_parent.is_none()));
+    assert!(r[3..]
         .iter()
         .all(|x| x.event.envelope_parent == Some(parent.id)));
     assert!(
-        r[2].event.content_hash.is_some() && r[2].event.content_hash != r[0].event.content_hash
+        r[3].event.content_hash.is_some() && r[3].event.content_hash != r[0].event.content_hash
     );
     let health = crate::ledger::check(&r);
     assert!(

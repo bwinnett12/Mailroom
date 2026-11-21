@@ -175,6 +175,22 @@ pub struct Envelope {
     /// to hash).
     #[serde(default)]
     pub content_hash: Option<String>,
+
+    /// Typed edges this envelope declares to other nodes, e.g.
+    /// `{"label": "ABOUT", "to": "topic/partial-derivatives"}`. Nothing
+    /// happens to them until a Link hop writes them to the ledger.
+    #[serde(default)]
+    pub links: Vec<LinkSpec>,
+}
+
+/// One declared edge: from this envelope's node, with `label`, to `to`.
+/// `to` is either a key you chose ("course/calc-3") or another envelope's
+/// UUID. A key nothing has claimed yet still becomes a node, like a wiki
+/// link to a page that doesn't exist yet.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LinkSpec {
+    pub label: String,
+    pub to: String,
 }
 
 /// What a caller sends to POST /envelope.
@@ -214,6 +230,7 @@ impl InboundEnvelope {
             tags:        self.tags,
             caused_by:   None,
             content_hash: None,
+            links:       Vec::new(),
             created_at:  self.created_at.unwrap_or(now),
             // Use caller's timestamp if provided, otherwise now.
             received_at: now,
@@ -222,6 +239,17 @@ impl InboundEnvelope {
 }
 
 impl Envelope {
+    /// This envelope's node in the graph. If `meta.key` is set (a stable
+    /// name you choose, e.g. "course/calc-3"), that is the node, and a
+    /// later envelope with the same key updates the same node. Otherwise
+    /// the node is `env:<uuid>`.
+    pub fn node_id(&self) -> String {
+        match self.meta.get("key").map(|k| k.trim()) {
+            Some(key) if !key.is_empty() => key.to_string(),
+            _ => format!("env:{}", self.id),
+        }
+    }
+
     /// Create a new Envelope with generated ID and current timestamps.
     ///
     /// This is the main constructor — sources call this to wrap their data.
@@ -260,6 +288,7 @@ impl Envelope {
             tags:        Vec::new(),
             caused_by:   None,
             content_hash: None,
+            links: Vec::new(),
         }
     }
 

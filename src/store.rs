@@ -33,12 +33,12 @@ fn origin_code(source: &Source) -> &'static str {
     // Lives for the entire program lifetime.
     // Perfect for short fixed codes like these.
     match source {
-        Source::Manual          => "MAN",
-        Source::Device(_)       => "DEV",
-        Source::WebHook(_)      => "WEB",
-        Source::Internal(_)     => "INT",
-        Source::Forwarded(_)    => "FWD",
-        Source::Other(_)        => "OTH",
+        Source::Manual => "MAN",
+        Source::Device(_) => "DEV",
+        Source::WebHook(_) => "WEB",
+        Source::Internal(_) => "INT",
+        Source::Forwarded(_) => "FWD",
+        Source::Other(_) => "OTH",
         // The _ inside each variant means "I know there's data here,
         // but I don't need it for this match." The compiler would warn
         // if we wrote Device without the _.
@@ -59,21 +59,21 @@ fn origin_code(source: &Source) -> &'static str {
 /// extension the same way, automatically, with no extra plumbing.
 fn content_extension(envelope: &Envelope) -> String {
     match &envelope.payload {
-        Payload::Text(_)     => "md".to_string(),
-        Payload::Json(_)     => "json".to_string(),
+        Payload::Text(_) => "md".to_string(),
+        Payload::Json(_) => "json".to_string(),
         Payload::FilePath(_) => "ref".to_string(),
         // .ref = a reference file — contains the path, not the bytes.
         // The actual file lives wherever FilePath points.
         // We don't copy large files into entries/ — we record where they are.
-        Payload::Url(_)      => "url".to_string(),
+        Payload::Url(_) => "url".to_string(),
         // .url = a URL reference file — contains the URL as plain text.
-        Payload::Bytes(_) => {
-            envelope.meta.get("filename")
-                .and_then(|name| name.rsplit_once('.'))
-                .map(|(_, ext)| ext.to_lowercase())
-                .filter(|ext| !ext.is_empty())
-                .unwrap_or_else(|| "bin".to_string())
-        }
+        Payload::Bytes(_) => envelope
+            .meta
+            .get("filename")
+            .and_then(|name| name.rsplit_once('.'))
+            .map(|(_, ext)| ext.to_lowercase())
+            .filter(|ext| !ext.is_empty())
+            .unwrap_or_else(|| "bin".to_string()),
     }
 }
 
@@ -85,15 +85,16 @@ fn content_extension(envelope: &Envelope) -> String {
 /// Example: 20250616T143200Z_MAN_34.2_72f489ec
 pub fn build_filename(envelope: &Envelope) -> String {
     let timestamp = format_timestamp(envelope.created_at);
-    let origin    = origin_code(&envelope.source);
-    let jd        = envelope.jd_address
+    let origin = origin_code(&envelope.source);
+    let jd = envelope
+        .jd_address
         .as_deref()
         // as_deref() converts Option<String> → Option<&str>.
         // Lets us use the string by reference without cloning.
         .unwrap_or("XX");
-        // XX = no address — shouldn't happen for accepted envelopes
-        // but we handle it gracefully rather than panicking.
-    let short_id  = &envelope.id.to_string()[..8];
+    // XX = no address — shouldn't happen for accepted envelopes
+    // but we handle it gracefully rather than panicking.
+    let short_id = &envelope.id.to_string()[..8];
     // to_string() converts Uuid to its hyphenated string form.
     // [..8] takes the first 8 characters — enough to be unique
     // in any realistic personal archive.
@@ -121,13 +122,13 @@ fn format_timestamp(dt: DateTime<Utc>) -> String {
 // Add Deserialize — we now read these back from disk in the list handler
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EntryMeta {
-    pub envelope_id:  String,
-    pub jd_address:   Option<String>,
-    pub data_type:    String,
-    pub source:       String,
-    pub created_at:   DateTime<Utc>,
-    pub received_at:  DateTime<Utc>,
-    pub meta:         std::collections::HashMap<String, String>,
+    pub envelope_id: String,
+    pub jd_address: Option<String>,
+    pub data_type: String,
+    pub source: String,
+    pub created_at: DateTime<Utc>,
+    pub received_at: DateTime<Utc>,
+    pub meta: std::collections::HashMap<String, String>,
     pub content_file: String,
 
     #[serde(default)]
@@ -149,20 +150,22 @@ pub struct EntryMeta {
 }
 
 impl EntryMeta {
-    fn from_envelope(envelope: &Envelope, 
-                     content_filename: &str,
-                    content_hash: Option<String>) -> Self {
+    fn from_envelope(
+        envelope: &Envelope,
+        content_filename: &str,
+        content_hash: Option<String>,
+    ) -> Self {
         Self {
-            envelope_id:  envelope.id.to_string(),
-            jd_address:   envelope.jd_address.clone(),
-            data_type:    envelope.data_type.clone(),
-            source:       format!("{:?}", envelope.source),
-            created_at:   envelope.created_at,
-            received_at:  envelope.received_at,
-            meta:         envelope.meta.clone(),
+            envelope_id: envelope.id.to_string(),
+            jd_address: envelope.jd_address.clone(),
+            data_type: envelope.data_type.clone(),
+            source: format!("{:?}", envelope.source),
+            created_at: envelope.created_at,
+            received_at: envelope.received_at,
+            meta: envelope.meta.clone(),
             content_file: content_filename.to_string(),
-            pinned:       false,
-            starred:      false,
+            pinned: false,
+            starred: false,
 
             content_hash,
             tags: envelope.tags.clone(),
@@ -176,7 +179,7 @@ impl EntryMeta {
 #[derive(Debug)]
 pub struct WriteResult {
     pub content_path: PathBuf,
-    pub meta_path:    PathBuf,
+    pub meta_path: PathBuf,
 }
 
 // ── store() ───────────────────────────────────────────────────────────────────
@@ -189,14 +192,13 @@ pub struct WriteResult {
 ///
 /// Returns the paths of the two files written.
 pub async fn store(
-    envelope:     &Envelope,
+    envelope: &Envelope,
     library_root: &Path,
-    jd_path:      &str,
+    jd_path: &str,
     // The relative path within the library to this node's directory.
     // We get this from the registry manifest — not derived from the
     // JD address alone, because the folder might have a custom name.
 ) -> anyhow::Result<WriteResult> {
-
     // ── Build the entries directory path ──────────────────────────────────────
     let entries_dir = library_root
         .join(jd_path)
@@ -211,13 +213,13 @@ pub async fn store(
     // The & borrows entries_dir — create_dir_all needs a reference, not ownership.
 
     // ── Build filenames ───────────────────────────────────────────────────────
-    let base      = build_filename(envelope);
-    let ext       = content_extension(envelope);
+    let base = build_filename(envelope);
+    let ext = content_extension(envelope);
     let content_filename = format!("{base}.{ext}");
-    let meta_filename    = format!("{base}.meta.json");
+    let meta_filename = format!("{base}.meta.json");
 
     let content_path = entries_dir.join(&content_filename);
-    let meta_path    = entries_dir.join(&meta_filename);
+    let meta_path = entries_dir.join(&meta_filename);
 
     // Reuse the hash the route already computed; only hash here for
     // callers that store an envelope without running a route.
@@ -231,9 +233,9 @@ pub async fn store(
         Payload::FilePath(src_path) => {
             // The file itself goes into the blob store under its hash; the
             // nest gets a small .ref saying which blob. See blobs.rs.
-            let hash = content_hash.as_deref().ok_or_else(|| {
-                anyhow::anyhow!("a file payload always has a content hash")
-            })?;
+            let hash = content_hash
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("a file payload always has a content hash"))?;
             let blob = crate::blobs::put(library_root, src_path, hash).await?;
             let reference = format!(
                 "ref: {}\noriginal: {}\n",
@@ -261,9 +263,11 @@ pub async fn store(
         "envelope written to disk"
     );
 
-    Ok(WriteResult { content_path, meta_path })
+    Ok(WriteResult {
+        content_path,
+        meta_path,
+    })
 }
-
 
 /// Sha256 of a payload's actual content. None for payloads with nothing
 /// local to hash (Url). For FilePath, hashes the *referenced file's*
@@ -273,7 +277,7 @@ pub(crate) async fn compute_content_hash(payload: &Payload) -> anyhow::Result<Op
     let mut hasher = Sha256::new();
 
     match payload {
-        Payload::Text(text)  => hasher.update(text.as_bytes()),
+        Payload::Text(text) => hasher.update(text.as_bytes()),
         Payload::Json(value) => hasher.update(&serde_json::to_vec(value)?),
         Payload::Bytes(bytes) => hasher.update(bytes),
         Payload::FilePath(src_path) => {
@@ -284,7 +288,9 @@ pub(crate) async fn compute_content_hash(payload: &Payload) -> anyhow::Result<Op
             let mut buf = [0u8; 8192];
             loop {
                 let n = file.read(&mut buf).await?;
-                if n == 0 { break; }
+                if n == 0 {
+                    break;
+                }
                 hasher.update(&buf[..n]);
             }
         }
