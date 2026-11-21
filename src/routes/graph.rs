@@ -14,6 +14,8 @@
 //   GET /graph/walk?from=<id>&depth=3&dir=in&labels=PART_OF,TAKEN_AT
 //   GET /graph/path?from=<a>&to=<b>&dir=both&labels=ABOUT,TAKEN_AT,PART_OF
 //   GET /graph/degrees                               M1 degree table
+//   GET /graph/centrality?top=10&labels=ABOUT,CITES  M2 eigenvector centrality,
+//                                                    per connected component
 //   GET /graph/edges.csv                             edge list for NetworkX
 //
 // Wire it in by adding `.merge(graph::routes())` to the router in
@@ -43,6 +45,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/graph/walk", get(walk))
         .route("/graph/path", get(path))
         .route("/graph/degrees", get(degrees))
+        .route("/graph/centrality", get(centrality))
         .route("/graph/edges.csv", get(edges_csv))
 }
 
@@ -233,5 +236,48 @@ async fn edges_csv(State(state): State<Arc<AppState>>) -> Reply {
             g.edges_csv(),
         )
             .into_response())
+    })
+}
+
+#[derive(Deserialize)]
+struct CentralityQuery {
+    labels: Option<String>,
+    top: Option<usize>,
+    /// How many components to report, biggest first.
+    components: Option<usize>,
+}
+
+async fn centrality(State(state): State<Arc<AppState>>, Query(q): Query<CentralityQuery>) -> Reply {
+    let labels = label_list(q.labels.as_deref());
+    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let top = q.top.unwrap_or(10);
+    let shown = q.components.unwrap_or(5);
+    with_graph(&state, |g| {
+        let comps = crate::graph::centrality::eigenvector(g, &labels).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
+        let total = comps.len();
+        let listed: Vec<_> = comps
+            .into_iter()
+            .take(shown)
+            .map(|c| {
+                json!({
+                    "size": c.nodes.len(),
+                    "lambda": c.lambda,
+                    "iterations": c.iterations,
+                    "top": c.nodes.into_iter().take(top).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        Ok(Json(json!({
+            "labels": if labels.is_empty() { json!("all except system edges") } else { json!(labels) },
+            "note": "scores are unit length per component; compare within a component, not across",
+            "components_total": total,
+            "components": listed,
+        }))
+        .into_response())
     })
 }

@@ -46,6 +46,7 @@
 // Making every event a node would add two nodes per stop and bury the
 // knowledge graph under bookkeeping.
 
+pub mod centrality;
 pub mod snapshot;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
