@@ -28,6 +28,15 @@
 //   Versioned   every record carries `v`. Readers tolerate unknown fields,
 //               so new fields can be added without breaking old records.
 //
+// The live graph (graph.rs) is kept here too, inside the same lock as the
+// file. Every successful append is applied to it before the lock is
+// released, so the graph is always exactly the ledger replayed: no reader
+// can see a record in one and not the other. Every MAILROOM_SNAPSHOT_EVERY
+// appends (default 1000, 0 = never) the graph is written to
+//   <vault>/.mailroom/graph/snapshot.bin
+// and on open the graph is loaded from that snapshot and only the records
+// after it are replayed. See graph/snapshot.rs.
+//
 // The per-nest logs/ and errors/ files written by event::record still
 // exist. They are views for humans browsing a nest; the ledger is the
 // record. A failed ledger append fails the route. A failed view write
@@ -43,6 +52,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::event::{Event, EventKind};
+use crate::graph::{snapshot, Graph};
+
+/// Default snapshot cadence, in appended records.
+pub const DEFAULT_SNAPSHOT_EVERY: u64 = 1000;
 
 /// Bump when the meaning of an existing field changes. Adding a field
 /// with a serde default does not need a bump.
@@ -65,6 +78,13 @@ pub struct Record {
 pub struct Ledger {
     path: PathBuf,
     device: String,
+    snapshot_path: PathBuf,
+    snapshot_every: u64,
+    startup: Startup,
+    /// Dangling references found at open. Only a full read can find them;
+    /// see `check` and the note in open_with.
+    dangling_causes: Vec<(u64, Uuid)>,
+    dangling_parents: Vec<(u64, Uuid)>,
     inner: Mutex<Inner>,
     // Held, never read: dropping the Ledger releases the lock.
     _lock: File,
@@ -75,6 +95,30 @@ struct Inner {
     next_seq: u64,
     /// Bytes known to be good. A failed append truncates back to this.
     len: u64,
+    /// The ledger replayed. Updated by every append, under this lock.
+    graph: Graph,
+    /// Appends since the last snapshot was written.
+    since_snapshot: u64,
+    /// seq and event_id of the newest record, which a snapshot is "as of".
+    last: Option<(u64, Uuid)>,
+    /// Arrivals not yet closed by Completed / Error / Interrupted, by
+    /// event_id. At startup these are the stops a crash cut off; while
+    /// running they are the stops in flight.
+    open: HashMap<Uuid, Record>,
+}
+
+/// How the graph was built when the ledger was opened.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Startup {
+    /// The snapshot's seq, if one was loaded and matched this ledger.
+    pub from_snapshot: Option<u64>,
+    /// Records replayed on top of the snapshot (or all of them, without one).
+    pub replayed: usize,
+    /// Why a snapshot on disk was not used, if there was one.
+    pub snapshot_rejected: Option<String>,
+    /// Bytes of ledger read and parsed at open.
+    pub bytes_read: u64,
+    pub millis: u128,
 }
 
 impl Ledger {
@@ -82,6 +126,16 @@ impl Ledger {
     /// final line. Fails if another process holds the ledger, or if a
     /// complete line is corrupt.
     pub fn open(vault_root: &Path) -> anyhow::Result<Ledger> {
+        let every = std::env::var("MAILROOM_SNAPSHOT_EVERY")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(DEFAULT_SNAPSHOT_EVERY);
+        Ledger::open_with(vault_root, every)
+    }
+
+    /// `open`, with an explicit snapshot cadence (0 = never snapshot).
+    pub fn open_with(vault_root: &Path, snapshot_every: u64) -> anyhow::Result<Ledger> {
+        let started = std::time::Instant::now();
         let dir = vault_root.join(".mailroom").join("ledger");
         std::fs::create_dir_all(&dir)?;
 
@@ -101,7 +155,57 @@ impl Ledger {
 
         let path = dir.join("events.jsonl");
         let existed = path.exists();
-        let (records, good_len, torn_bytes) = scan(&path)?;
+        let snapshot_path = vault_root
+            .join(".mailroom")
+            .join("graph")
+            .join("snapshot.bin");
+
+        // ── Where to start reading ──────────────────────────────────────────
+        //
+        // With a snapshot that matches this ledger, the graph and the open
+        // arrivals come from the snapshot, and only the ledger bytes after
+        // its checkpoint are read. Without one, the whole ledger is read.
+        //
+        // The trade: records before the checkpoint are not re-parsed at
+        // every start. They were parsed when they were appended and again
+        // when the snapshot was taken; the tail, where a crash can do
+        // damage, is always checked. Dangling-reference warnings need every
+        // event id, so they only run on a full read.
+        let mut snapshot_rejected = None;
+        let loaded = match snapshot::read(&snapshot_path) {
+            Ok(None) => None,
+            Err(e) => {
+                snapshot_rejected = Some(format!("damaged: {e}"));
+                None
+            }
+            Ok(Some(l)) => match verify_checkpoint(&path, &l.checkpoint) {
+                Ok(()) => Some(l),
+                Err(why) => {
+                    snapshot_rejected = Some(why);
+                    None
+                }
+            },
+        };
+        if let Some(why) = &snapshot_rejected {
+            tracing::warn!(snapshot = %snapshot_path.display(), %why, "graph snapshot not used — rebuilding from the whole ledger");
+        }
+
+        let (mut graph, mut open, start, expect_seq, base) = match loaded {
+            Some(l) => {
+                let cp = l.checkpoint;
+                let open = cp
+                    .open_arrivals
+                    .iter()
+                    .map(|r| (r.event.event_id, r.clone()))
+                    .collect();
+                let base = Some((cp.last_seq, cp.last_event_id));
+                (l.graph, open, cp.ledger_offset, Some(cp.last_seq + 1), base)
+            }
+            None => (Graph::default(), HashMap::new(), 0, None, None),
+        };
+        let from_snapshot = base.map(|(seq, _)| seq);
+
+        let (tail, good_len, torn_bytes) = scan_from(&path, start, expect_seq)?;
 
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
         if torn_bytes > 0 {
@@ -119,16 +223,67 @@ impl Ledger {
             File::open(&dir)?.sync_all()?;
         }
 
-        let next_seq = records.last().map(|r| r.seq + 1).unwrap_or(1);
+        for r in &tail {
+            graph.apply(r);
+            track(&mut open, r);
+        }
+        let (dangling_causes, dangling_parents) = if from_snapshot.is_none() {
+            let h = check(&tail);
+            (h.dangling_causes, h.dangling_parents)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
+        let last = tail.last().map(|r| (r.seq, r.event.event_id)).or(base);
+        let next_seq = last.map(|(seq, _)| seq + 1).unwrap_or(1);
+        let mut inner = Inner {
+            file,
+            next_seq,
+            len: good_len,
+            graph,
+            since_snapshot: tail.len() as u64,
+            last,
+            open,
+        };
+
+        // Write a fresh snapshot if the one on disk was unusable, or the
+        // tail has grown past the cadence. Failure is only a warning: the
+        // ledger is intact, and the next start just reads more of it.
+        let stale = snapshot_rejected.is_some()
+            || (snapshot_every > 0 && inner.since_snapshot >= snapshot_every);
+        if stale && last.is_some() {
+            if let Err(e) = write_snapshot(&snapshot_path, &mut inner) {
+                tracing::warn!(error = %e, "could not write graph snapshot");
+            }
+        }
+
+        let startup = Startup {
+            from_snapshot,
+            replayed: tail.len(),
+            snapshot_rejected,
+            bytes_read: good_len + torn_bytes - start,
+            millis: started.elapsed().as_millis(),
+        };
+        tracing::info!(
+            records = next_seq - 1,
+            from_snapshot = ?startup.from_snapshot,
+            replayed = startup.replayed,
+            bytes_read = startup.bytes_read,
+            nodes = inner.graph.node_count(),
+            edges = inner.graph.edge_count(),
+            ms = startup.millis,
+            "graph loaded"
+        );
 
         Ok(Ledger {
             path,
             device: device_name(),
-            inner: Mutex::new(Inner {
-                file,
-                next_seq,
-                len: good_len,
-            }),
+            snapshot_path,
+            snapshot_every,
+            startup,
+            dangling_causes,
+            dangling_parents,
+            inner: Mutex::new(inner),
             _lock: lock,
         })
     }
@@ -159,15 +314,54 @@ impl Ledger {
 
         inner.len += line.len() as u64;
         inner.next_seq += 1;
+
+        // The record is durable; now the graph. Same lock, so no reader
+        // sees the ledger and the graph disagree.
+        inner.graph.apply(&record);
+        track(&mut inner.open, &record);
+        inner.last = Some((record.seq, record.event.event_id));
+        inner.since_snapshot += 1;
+        if self.snapshot_every > 0 && inner.since_snapshot >= self.snapshot_every {
+            // Synchronous, under the lock: appends wait while it's written.
+            // Fine at this size; a background writer is a later change.
+            if let Err(e) = write_snapshot(&self.snapshot_path, &mut inner) {
+                tracing::warn!(error = %e, "could not write graph snapshot");
+            }
+        }
         Ok(record)
     }
 
-    /// Every record, in order.
+    /// Run `f` against the live graph. The ledger is locked while `f` runs,
+    /// so keep it to reading.
+    pub fn with_graph<R>(&self, f: impl FnOnce(&Graph) -> R) -> R {
+        let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        f(&inner.graph)
+    }
+
+    /// Write a snapshot now, whatever the cadence.
+    #[allow(dead_code)]
+    pub fn snapshot_now(&self) -> anyhow::Result<()> {
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if inner.last.is_none() {
+            return Ok(());
+        }
+        write_snapshot(&self.snapshot_path, &mut inner)
+    }
+
+    /// How the graph was built at open.
+    #[allow(dead_code)]
+    pub fn startup(&self) -> &Startup {
+        &self.startup
+    }
+
+    /// Every record, in order. Reads the whole file: for tests and
+    /// one-off checks, not the request path.
+    #[allow(dead_code)]
     pub fn records(&self) -> anyhow::Result<Vec<Record>> {
         // Holding the lock keeps a concurrent append from being read half
         // written.
         let _inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        Ok(scan(&self.path)?.0)
+        Ok(scan_from(&self.path, 0, None)?.0)
     }
 
     pub fn path(&self) -> &Path {
@@ -183,7 +377,20 @@ impl Ledger {
     /// Interrupted event is appended, so the gap is recorded once and the
     /// next startup does not report it again.
     pub fn recover(&self) -> anyhow::Result<Health> {
-        let health = check(&self.records()?);
+        // The open arrivals are kept up to date on every append (and carried
+        // in the snapshot), so nothing needs re-reading here.
+        let (mut interrupted, records) = {
+            let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+            let open: Vec<Record> = inner.open.values().cloned().collect();
+            (open, inner.next_seq as usize - 1)
+        };
+        interrupted.sort_by_key(|r| r.seq);
+        let health = Health {
+            records,
+            interrupted,
+            dangling_causes: self.dangling_causes.clone(),
+            dangling_parents: self.dangling_parents.clone(),
+        };
         for arrival in &health.interrupted {
             let mut event = Event::new(
                 &arrival.event.to,
@@ -211,6 +418,80 @@ impl Ledger {
         }
         Ok(health)
     }
+}
+
+fn write_snapshot(path: &Path, inner: &mut Inner) -> anyhow::Result<()> {
+    let (last_seq, last_event_id) = inner.last.expect("callers check there is a record");
+    let mut open_arrivals: Vec<Record> = inner.open.values().cloned().collect();
+    open_arrivals.sort_by_key(|r| r.seq);
+    let checkpoint = snapshot::Checkpoint {
+        last_seq,
+        last_event_id,
+        ledger_offset: inner.len,
+        open_arrivals,
+    };
+    snapshot::write(path, &inner.graph, &checkpoint)?;
+    inner.since_snapshot = 0;
+    tracing::debug!(seq = last_seq, "graph snapshot written");
+    Ok(())
+}
+
+/// Keep the set of open arrivals in step with one record.
+fn track(open: &mut HashMap<Uuid, Record>, r: &Record) {
+    match r.event.kind {
+        EventKind::Transition => {
+            open.insert(r.event.event_id, r.clone());
+        }
+        EventKind::Completed | EventKind::Error | EventKind::Interrupted => {
+            if let Some(cause) = r.event.caused_by {
+                open.remove(&cause);
+            }
+        }
+        EventKind::Received | EventKind::Linked => {}
+    }
+}
+
+/// A snapshot belongs to this ledger if the line just before its
+/// ledger_offset is the record it says it was taken at. Reads only that
+/// one line. Catches a snapshot from another vault, one kept after the
+/// ledger was reset, and one ahead of a ledger that lost records.
+fn verify_checkpoint(path: &Path, cp: &snapshot::Checkpoint) -> Result<(), String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if cp.last_seq == 0 || cp.ledger_offset == 0 {
+        return Err("snapshot is of an empty ledger".into());
+    }
+    if len < cp.ledger_offset {
+        return Err(format!(
+            "snapshot covers {} bytes of ledger, the ledger is {len} bytes",
+            cp.ledger_offset
+        ));
+    }
+    // Read back far enough to hold the last line before the offset.
+    let window = cp.ledger_offset.min(1 << 20);
+    let mut buf = vec![0u8; window as usize];
+    let mut f = File::open(path).map_err(|e| e.to_string())?;
+    f.seek(SeekFrom::Start(cp.ledger_offset - window))
+        .map_err(|e| e.to_string())?;
+    f.read_exact(&mut buf).map_err(|e| e.to_string())?;
+    if buf.last() != Some(&b'\n') {
+        return Err("snapshot's offset is not at the end of a ledger line".into());
+    }
+    let body = &buf[..buf.len() - 1];
+    let line = match body.iter().rposition(|&b| b == b'\n') {
+        Some(p) => &body[p + 1..],
+        None if window == cp.ledger_offset => body,
+        None => return Err("record before the snapshot's offset is too long to check".into()),
+    };
+    let r: Record = serde_json::from_slice(line)
+        .map_err(|_| "the line before the snapshot's offset is not a record".to_string())?;
+    if r.seq != cp.last_seq || r.event.event_id != cp.last_event_id {
+        return Err(format!(
+            "record {} at the snapshot's offset is not the one it was taken at (another vault, or a reset ledger)",
+            r.seq
+        ));
+    }
+    Ok(())
 }
 
 /// What a pass over the ledger found.
@@ -271,13 +552,32 @@ pub fn check(records: &[Record]) -> Health {
     health
 }
 
-/// Read a ledger file. Returns the records, the byte length of the good
-/// prefix, and how many bytes of unterminated tail follow it.
-fn scan(path: &Path) -> anyhow::Result<(Vec<Record>, u64, u64)> {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), 0, 0)),
+/// Read a ledger file from byte `start` (0 for the whole file). Returns
+/// the records, the byte length of the good prefix (counted from the start
+/// of the file), and how many bytes of unterminated tail follow it.
+/// `expect_seq` is the seq the first record must have, when reading from a
+/// checkpoint.
+fn scan_from(
+    path: &Path,
+    start: u64,
+    expect_seq: Option<u64>,
+) -> anyhow::Result<(Vec<Record>, u64, u64)> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut bytes = Vec::new();
+    match File::open(path) {
+        Ok(mut f) => {
+            f.seek(SeekFrom::Start(start))?;
+            f.read_to_end(&mut bytes)?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), start, 0)),
         Err(e) => return Err(e.into()),
+    }
+    let place = |line_no: usize| {
+        if start == 0 {
+            format!("line {line_no}")
+        } else {
+            format!("line {line_no} after byte {start}")
+        }
     };
 
     let mut records: Vec<Record> = Vec::new();
@@ -288,33 +588,36 @@ fn scan(path: &Path) -> anyhow::Result<(Vec<Record>, u64, u64)> {
         let Some(end) = bytes[offset..].iter().position(|&b| b == b'\n') else {
             // No newline: the write that made this line never finished.
             let torn = (bytes.len() - offset) as u64;
-            return Ok((records, offset as u64, torn));
+            return Ok((records, start + offset as u64, torn));
         };
         line_no += 1;
         let line = &bytes[offset..offset + end];
         let record: Record = serde_json::from_slice(line).map_err(|e| {
             anyhow::anyhow!(
-                "ledger {} line {line_no} is complete but unreadable ({e}). \
+                "ledger {} {} is complete but unreadable ({e}). \
                  That is corruption, not an interrupted write, so Mailroom \
                  will not guess. Inspect the line, then fix or remove it by hand",
-                path.display()
+                path.display(),
+                place(line_no)
             )
         })?;
-        if let Some(prev) = records.last() {
-            if record.seq != prev.seq + 1 {
+        let expected = records.last().map(|p| p.seq + 1).or(expect_seq);
+        if let Some(want) = expected {
+            if record.seq != want {
                 anyhow::bail!(
-                    "ledger {} line {line_no}: seq {} follows {} — records are \
+                    "ledger {} {}: seq {} follows {} — records are \
                      missing or out of order",
                     path.display(),
+                    place(line_no),
                     record.seq,
-                    prev.seq
+                    want - 1
                 );
             }
         }
         records.push(record);
         offset += end + 1;
     }
-    Ok((records, offset as u64, 0))
+    Ok((records, start + offset as u64, 0))
 }
 
 /// The one ledger for this vault in this process. Every route in the
@@ -360,6 +663,184 @@ mod tests {
 
     fn ledger_file(vault: &Path) -> PathBuf {
         vault.join(".mailroom/ledger/events.jsonl")
+    }
+
+    // ── The live graph and its snapshot ──────────────────────────────────
+
+    fn link(i: u64) -> Event {
+        let mut e = ev(EventKind::Linked, None, None);
+        e.link = Some(crate::event::LinkFacts {
+            from: format!("n{i}"),
+            label: "NEXT".into(),
+            to: format!("n{}", i + 1),
+        });
+        e
+    }
+
+    fn same_as_replay(l: &Ledger) {
+        let replayed = Graph::from_records(&l.records().unwrap());
+        l.with_graph(|g| {
+            assert_eq!(g.edges(), replayed.edges());
+            assert_eq!(g.degrees(), replayed.degrees());
+        });
+    }
+
+    #[test]
+    fn the_live_graph_is_always_the_ledger_replayed() {
+        let vault = tempfile::tempdir().unwrap();
+        let l = Ledger::open_with(vault.path(), 0).unwrap();
+        for i in 0..5 {
+            l.append(link(i)).unwrap();
+            same_as_replay(&l);
+        }
+        assert_eq!(l.with_graph(|g| g.edge_count()), 5);
+    }
+
+    // Snapshot every 2 appends; 5 appends → snapshots at seq 2 and 4.
+    // Reopen: load the seq-4 snapshot, replay 1 record (seq 5).
+    #[test]
+    fn reopening_loads_the_snapshot_and_replays_only_the_tail() {
+        let vault = tempfile::tempdir().unwrap();
+        {
+            let l = Ledger::open_with(vault.path(), 2).unwrap();
+            for i in 0..5 {
+                l.append(link(i)).unwrap();
+            }
+        }
+        let l = Ledger::open_with(vault.path(), 2).unwrap();
+        assert_eq!(l.startup().from_snapshot, Some(4));
+        assert_eq!(l.startup().replayed, 1);
+        same_as_replay(&l);
+    }
+
+    #[test]
+    fn a_snapshot_from_another_vault_is_ignored() {
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        for v in [&a, &b] {
+            let l = Ledger::open_with(v.path(), 0).unwrap();
+            for i in 0..3 {
+                l.append(link(i)).unwrap();
+            }
+            l.snapshot_now().unwrap();
+        }
+        let snap = |v: &tempfile::TempDir| v.path().join(".mailroom/graph/snapshot.bin");
+        std::fs::copy(snap(&a), snap(&b)).unwrap();
+
+        let l = Ledger::open_with(b.path(), 0).unwrap();
+        assert_eq!(l.startup().from_snapshot, None);
+        assert!(l
+            .startup()
+            .snapshot_rejected
+            .as_deref()
+            .unwrap()
+            .contains("another vault"));
+        same_as_replay(&l);
+    }
+
+    #[test]
+    fn a_damaged_snapshot_is_rebuilt_and_replaced() {
+        let vault = tempfile::tempdir().unwrap();
+        {
+            let l = Ledger::open_with(vault.path(), 0).unwrap();
+            for i in 0..3 {
+                l.append(link(i)).unwrap();
+            }
+            l.snapshot_now().unwrap();
+        }
+        let snap = vault.path().join(".mailroom/graph/snapshot.bin");
+        let mut bytes = std::fs::read(&snap).unwrap();
+        let n = bytes.len();
+        bytes[n - 3] ^= 0xFF;
+        std::fs::write(&snap, bytes).unwrap();
+
+        let l = Ledger::open_with(vault.path(), 0).unwrap();
+        assert!(l
+            .startup()
+            .snapshot_rejected
+            .as_deref()
+            .unwrap()
+            .starts_with("damaged"));
+        same_as_replay(&l);
+        drop(l);
+        let l = Ledger::open_with(vault.path(), 0).unwrap();
+        assert_eq!(
+            l.startup().from_snapshot,
+            Some(3),
+            "a good snapshot was written in its place"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_ahead_of_the_ledger_is_ignored() {
+        let vault = tempfile::tempdir().unwrap();
+        {
+            let l = Ledger::open_with(vault.path(), 0).unwrap();
+            for i in 0..4 {
+                l.append(link(i)).unwrap();
+            }
+            l.snapshot_now().unwrap();
+        }
+        // The ledger loses its last two records (restored from an older copy).
+        let file = ledger_file(vault.path());
+        let text = std::fs::read_to_string(&file).unwrap();
+        let kept: String = text.lines().take(2).map(|l| format!("{l}\n")).collect();
+        std::fs::write(&file, kept).unwrap();
+
+        let l = Ledger::open_with(vault.path(), 0).unwrap();
+        assert!(l
+            .startup()
+            .snapshot_rejected
+            .as_deref()
+            .unwrap()
+            .contains("the ledger is"));
+        assert_eq!(l.with_graph(|g| g.edge_count()), 2);
+    }
+
+    // A crash after a snapshot: the stop that was open when the snapshot
+    // was taken must still be found by recovery, without a full read.
+    #[test]
+    fn an_open_stop_carried_in_the_snapshot_is_still_recovered() {
+        let vault = tempfile::tempdir().unwrap();
+        let arrival = {
+            let l = Ledger::open_with(vault.path(), 0).unwrap();
+            l.append(link(0)).unwrap();
+            let a = l.append(ev(EventKind::Transition, None, None)).unwrap();
+            l.snapshot_now().unwrap();
+            l.append(link(1)).unwrap();
+            a
+        }; // "crash": the arrival never closed
+        let l = Ledger::open_with(vault.path(), 0).unwrap();
+        assert_eq!(l.startup().from_snapshot, Some(2));
+        assert_eq!(
+            l.startup().replayed,
+            1,
+            "only the record after the checkpoint was read"
+        );
+        let h = l.recover().unwrap();
+        assert_eq!(h.interrupted.len(), 1);
+        assert_eq!(h.interrupted[0].event.event_id, arrival.event.event_id);
+        assert!(l.recover().unwrap().interrupted.is_empty());
+    }
+
+    #[test]
+    fn a_torn_tail_after_the_checkpoint_is_still_repaired() {
+        let vault = tempfile::tempdir().unwrap();
+        {
+            let l = Ledger::open_with(vault.path(), 0).unwrap();
+            l.append(link(0)).unwrap();
+            l.snapshot_now().unwrap();
+            l.append(link(1)).unwrap();
+        }
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(ledger_file(vault.path()))
+            .unwrap();
+        f.write_all(br#"{"v":1,"seq":3,"dev"#).unwrap();
+        drop(f);
+        let l = Ledger::open_with(vault.path(), 0).unwrap();
+        assert_eq!(l.startup().from_snapshot, Some(1));
+        assert_eq!(l.append(link(2)).unwrap().seq, 3);
+        same_as_replay(&l);
     }
 
     #[test]

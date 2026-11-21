@@ -46,9 +46,11 @@
 // Making every event a node would add two nodes per stop and bury the
 // knowledge graph under bookkeeping.
 
+pub mod snapshot;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -57,14 +59,14 @@ use crate::ledger::Record;
 
 pub type NodeId = String;
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Node {
     pub id: NodeId,
     pub labels: BTreeSet<String>,
     pub props: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Edge {
     pub from: NodeId,
     pub label: String,
@@ -115,7 +117,10 @@ pub struct Degree {
 }
 
 impl Graph {
-    /// Replay ledger records, in order, into a graph.
+    /// Replay ledger records, in order, into a graph. The ledger builds
+    /// its live graph record by record; this is the same thing in one go,
+    /// used by tests to check the live graph against a fresh replay.
+    #[allow(dead_code)]
     pub fn from_records(records: &[Record]) -> Graph {
         let mut g = Graph::default();
         for r in records {
@@ -136,14 +141,20 @@ impl Graph {
                 }
                 let n = self.ensure(&node);
                 n.labels.insert(kind_of(&facts.data_type));
-                n.props.insert("data_type".into(), Value::from(facts.data_type.clone()));
-                n.props.insert("created_at".into(), Value::from(facts.created_at.to_rfc3339()));
-                n.props.insert("device".into(), Value::from(r.device.clone()));
+                n.props
+                    .insert("data_type".into(), Value::from(facts.data_type.clone()));
+                n.props.insert(
+                    "created_at".into(),
+                    Value::from(facts.created_at.to_rfc3339()),
+                );
+                n.props
+                    .insert("device".into(), Value::from(r.device.clone()));
                 if let Some(title) = &facts.title {
                     n.props.insert("title".into(), Value::from(title.clone()));
                 }
                 if !facts.tags.is_empty() {
-                    n.props.insert("tags".into(), Value::from(facts.tags.clone()));
+                    n.props
+                        .insert("tags".into(), Value::from(facts.tags.clone()));
                 }
                 if let Some(hash) = &e.content_hash {
                     let blob = format!("blob:{hash}");
@@ -197,10 +208,22 @@ impl Graph {
     pub fn edges_of(&self, id: &str, dir: Direction, label: Option<&str>) -> Vec<&Edge> {
         let mut found = Vec::new();
         if matches!(dir, Direction::Out | Direction::Both) {
-            found.extend(self.out.get(id).into_iter().flatten().map(|&i| &self.edges[i]));
+            found.extend(
+                self.out
+                    .get(id)
+                    .into_iter()
+                    .flatten()
+                    .map(|&i| &self.edges[i]),
+            );
         }
         if matches!(dir, Direction::In | Direction::Both) {
-            found.extend(self.inc.get(id).into_iter().flatten().map(|&i| &self.edges[i]));
+            found.extend(
+                self.inc
+                    .get(id)
+                    .into_iter()
+                    .flatten()
+                    .map(|&i| &self.edges[i]),
+            );
         }
         found.retain(|e| label.is_none_or(|l| e.label == l));
         found
@@ -239,7 +262,13 @@ impl Graph {
     /// Breadth-first from `start`, up to `max_depth` steps, following only
     /// edges whose label is in `labels` (all labels if empty). Returns each
     /// reachable node (not `start`) with its distance, nearest first.
-    pub fn walk(&self, start: &str, max_depth: usize, dir: Direction, labels: &[&str]) -> Vec<(NodeId, usize)> {
+    pub fn walk(
+        &self,
+        start: &str,
+        max_depth: usize,
+        dir: Direction,
+        labels: &[&str],
+    ) -> Vec<(NodeId, usize)> {
         let mut dist: HashMap<String, usize> = HashMap::from([(start.to_string(), 0)]);
         let mut queue = VecDeque::from([start.to_string()]);
         let mut order = Vec::new();
@@ -325,7 +354,11 @@ impl Graph {
     /// order[i] → order[j] with a label in `labels` (all if empty).
     /// With set semantics that number is 0 or 1 per label.
     pub fn adjacency(&self, order: &[NodeId], labels: &[&str]) -> Vec<Vec<u64>> {
-        let index: HashMap<&str, usize> = order.iter().enumerate().map(|(i, id)| (id.as_str(), i)).collect();
+        let index: HashMap<&str, usize> = order
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (id.as_str(), i))
+            .collect();
         let mut a = vec![vec![0u64; order.len()]; order.len()];
         for e in &self.edges {
             if !labels.is_empty() && !labels.contains(&e.label.as_str()) {
@@ -344,9 +377,71 @@ impl Graph {
     pub fn edges_csv(&self) -> String {
         let mut out = String::from("source,target,label,seq\n");
         for e in &self.edges {
-            out.push_str(&format!("{},{},{},{}\n", csv(&e.from), csv(&e.to), csv(&e.label), e.seq));
+            out.push_str(&format!(
+                "{},{},{},{}\n",
+                csv(&e.from),
+                csv(&e.to),
+                csv(&e.label),
+                e.seq
+            ));
         }
         out
+    }
+
+    // ── Snapshot support ────────────────────────────────────────────────────
+
+    /// Envelopes received with a key, and the node each one is. Sorted by
+    /// uuid so a snapshot of the same graph is the same bytes.
+    pub fn envelope_keys(&self) -> Vec<(Uuid, &NodeId)> {
+        let mut keys: Vec<_> = self.envelope_node.iter().map(|(u, n)| (*u, n)).collect();
+        keys.sort();
+        keys
+    }
+
+    /// Rebuild a graph from what a snapshot stores. The indexes (out, in,
+    /// seen) are derived, not stored, so they can't disagree with the edges.
+    /// Rejects edges that point at nodes the snapshot doesn't hold.
+    pub fn from_parts(
+        nodes: Vec<Node>,
+        edges: Vec<Edge>,
+        env_keys: Vec<(Uuid, NodeId)>,
+    ) -> anyhow::Result<Graph> {
+        let mut g = Graph::default();
+        for n in nodes {
+            let id = n.id.clone();
+            if g.nodes.insert(id.clone(), n).is_some() {
+                anyhow::bail!("snapshot holds node {id:?} twice");
+            }
+        }
+        for e in edges {
+            for end in [&e.from, &e.to] {
+                if !g.nodes.contains_key(end) {
+                    anyhow::bail!(
+                        "snapshot edge {} -{}-> {} names missing node {end:?}",
+                        e.from,
+                        e.label,
+                        e.to
+                    );
+                }
+            }
+            if !g
+                .seen
+                .insert((e.from.clone(), e.label.clone(), e.to.clone()))
+            {
+                anyhow::bail!(
+                    "snapshot holds edge {} -{}-> {} twice",
+                    e.from,
+                    e.label,
+                    e.to
+                );
+            }
+            let i = g.edges.len();
+            g.out.entry(e.from.clone()).or_default().push(i);
+            g.inc.entry(e.to.clone()).or_default().push(i);
+            g.edges.push(e);
+        }
+        g.envelope_node = env_keys.into_iter().collect();
+        Ok(g)
     }
 
     // ── Building ────────────────────────────────────────────────────────────
@@ -367,7 +462,12 @@ impl Graph {
         self.ensure(from);
         self.ensure(to);
         let i = self.edges.len();
-        self.edges.push(Edge { from: from.to_string(), label: label.to_string(), to: to.to_string(), seq });
+        self.edges.push(Edge {
+            from: from.to_string(),
+            label: label.to_string(),
+            to: to.to_string(),
+            seq,
+        });
         self.out.entry(from.to_string()).or_default().push(i);
         self.inc.entry(to.to_string()).or_default().push(i);
     }
@@ -375,14 +475,21 @@ impl Graph {
     /// The node for an envelope: its key if it was received with one,
     /// otherwise env:<uuid>.
     fn envelope(&mut self, id: Uuid) -> NodeId {
-        let node = self.envelope_node.get(&id).cloned().unwrap_or_else(|| format!("env:{id}"));
+        let node = self
+            .envelope_node
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| format!("env:{id}"));
         self.ensure(&node);
         node
     }
 
     /// A link target as recorded ("env:<uuid>" or a key) → node id.
     fn resolve(&mut self, target: &str) -> NodeId {
-        if let Some(id) = target.strip_prefix("env:").and_then(|u| Uuid::parse_str(u).ok()) {
+        if let Some(id) = target
+            .strip_prefix("env:")
+            .and_then(|u| Uuid::parse_str(u).ok())
+        {
             return self.envelope(id);
         }
         target.to_string()
@@ -421,7 +528,11 @@ pub fn mat_pow(a: &[Vec<u64>], k: u32) -> Vec<Vec<u64>> {
 }
 
 fn other_end<'a>(e: &'a Edge, id: &str) -> &'a str {
-    if e.from == id { &e.to } else { &e.from }
+    if e.from == id {
+        &e.to
+    } else {
+        &e.from
+    }
 }
 
 /// "note/class" → "note"; "paper" → "paper".
@@ -446,8 +557,17 @@ mod tests {
 
     fn linked(seq: u64, from: &str, label: &str, to: &str) -> Record {
         let mut event = Event::new("n", "n", None, None, EventKind::Linked, None);
-        event.link = Some(LinkFacts { from: from.into(), label: label.into(), to: to.into() });
-        Record { v: 1, seq, device: "t".into(), event }
+        event.link = Some(LinkFacts {
+            from: from.into(),
+            label: label.into(),
+            to: to.into(),
+        });
+        Record {
+            v: 1,
+            seq,
+            device: "t".into(),
+            event,
+        }
     }
 
     fn ids(v: &[&str]) -> Vec<NodeId> {
@@ -477,7 +597,11 @@ mod tests {
             linked(4, "C", "R", "D"),
         ]);
 
-        let d: Vec<(usize, usize)> = g.degrees().iter().map(|d| (d.out_degree, d.in_degree)).collect();
+        let d: Vec<(usize, usize)> = g
+            .degrees()
+            .iter()
+            .map(|d| (d.out_degree, d.in_degree))
+            .collect();
         assert_eq!(d, vec![(2, 0), (1, 1), (1, 2), (0, 1)]);
         let (outs, ins): (Vec<usize>, Vec<usize>) = d.into_iter().unzip();
         assert_eq!(outs.iter().sum::<usize>(), g.edge_count());
@@ -485,17 +609,41 @@ mod tests {
 
         let order = ids(&["A", "B", "C", "D"]);
         let a = g.adjacency(&order, &[]);
-        assert_eq!(a, vec![vec![0, 1, 1, 0], vec![0, 0, 1, 0], vec![0, 0, 0, 1], vec![0, 0, 0, 0]]);
-        assert_eq!(mat_pow(&a, 2), vec![vec![0, 0, 1, 1], vec![0, 0, 0, 1], vec![0, 0, 0, 0], vec![0, 0, 0, 0]]);
+        assert_eq!(
+            a,
+            vec![
+                vec![0, 1, 1, 0],
+                vec![0, 0, 1, 0],
+                vec![0, 0, 0, 1],
+                vec![0, 0, 0, 0]
+            ]
+        );
+        assert_eq!(
+            mat_pow(&a, 2),
+            vec![
+                vec![0, 0, 1, 1],
+                vec![0, 0, 0, 1],
+                vec![0, 0, 0, 0],
+                vec![0, 0, 0, 0]
+            ]
+        );
         assert_eq!(mat_pow(&a, 3)[0][3], 1);
-        assert_eq!(mat_pow(&a, 4), vec![vec![0; 4]; 4], "no walk of length 4 in a 4-node DAG path");
+        assert_eq!(
+            mat_pow(&a, 4),
+            vec![vec![0; 4]; 4],
+            "no walk of length 4 in a 4-node DAG path"
+        );
     }
 
     #[test]
     fn the_same_link_twice_is_one_edge() {
         let g = Graph::from_records(&[linked(1, "a", "ABOUT", "b"), linked(2, "a", "ABOUT", "b")]);
         assert_eq!(g.edge_count(), 1);
-        assert_eq!(g.edges()[0].seq, 1, "the edge keeps the record that first made it");
+        assert_eq!(
+            g.edges()[0].seq,
+            1,
+            "the edge keeps the record that first made it"
+        );
     }
 
     #[test]
@@ -503,17 +651,37 @@ mod tests {
         let mut g = Graph::from_records(&[linked(1, "note-1", "ABOUT", "topic/trig")]);
         assert!(g.node("topic/trig").unwrap().labels.is_empty());
 
-        let mut topic = Envelope::new(Source::Manual, "topic", Payload::Text("Trigonometry".into()), None::<&str>);
+        let mut topic = Envelope::new(
+            Source::Manual,
+            "topic",
+            Payload::Text("Trigonometry".into()),
+            None::<&str>,
+        );
         topic.meta.insert("key".into(), "topic/trig".into());
         topic.meta.insert("title".into(), "Trigonometry".into());
-        let mut received = Event::new("intake", "x", None, Some(topic.id), EventKind::Received, None);
+        let mut received = Event::new(
+            "intake",
+            "x",
+            None,
+            Some(topic.id),
+            EventKind::Received,
+            None,
+        );
         received.envelope = Some(crate::event::EnvelopeFacts::of(&topic));
-        g.apply(&Record { v: 1, seq: 2, device: "t".into(), event: received });
+        g.apply(&Record {
+            v: 1,
+            seq: 2,
+            device: "t".into(),
+            event: received,
+        });
 
         let n = g.node("topic/trig").unwrap();
         assert!(n.labels.contains("topic"));
         assert_eq!(n.props["title"], "Trigonometry");
-        assert_eq!(g.hop(&ids(&["topic/trig"]), Some("ABOUT"), Direction::In), ids(&["note-1"]));
+        assert_eq!(
+            g.hop(&ids(&["topic/trig"]), Some("ABOUT"), Direction::In),
+            ids(&["note-1"])
+        );
     }
 
     // ── The Calc 3 query, through real routes ───────────────────────────
@@ -537,14 +705,37 @@ mod tests {
     //                                     = paper, topic/pd, note4, s4, course
     //   path(paper → course), any edge    = paper, nest:40, course
     //     (both visited nest 40: the folder, not the meaning)
-    async fn send(vault: &std::path::Path, data_type: &str, key: Option<&str>, title: &str, links: &[(&str, &str)]) -> Envelope {
-        let mut e = Envelope::new(Source::Manual, data_type, Payload::Text(title.into()), None::<&str>);
+    async fn send(
+        vault: &std::path::Path,
+        data_type: &str,
+        key: Option<&str>,
+        title: &str,
+        links: &[(&str, &str)],
+    ) -> Envelope {
+        let mut e = Envelope::new(
+            Source::Manual,
+            data_type,
+            Payload::Text(title.into()),
+            None::<&str>,
+        );
         if let Some(k) = key {
             e.meta.insert("key".into(), k.into());
         }
         e.meta.insert("title".into(), title.into());
-        e.links = links.iter().map(|(l, t)| LinkSpec { label: l.to_string(), to: t.to_string() }).collect();
-        let mut route = Route::new("librarian", vec![Stop { nest_id: "40".into(), hops: vec![Hop::Link] }]);
+        e.links = links
+            .iter()
+            .map(|(l, t)| LinkSpec {
+                label: l.to_string(),
+                to: t.to_string(),
+            })
+            .collect();
+        let mut route = Route::new(
+            "librarian",
+            vec![Stop {
+                nest_id: "40".into(),
+                hops: vec![Hop::Link],
+            }],
+        );
         route.run(vault, Some(&e)).await.unwrap();
         e
     }
@@ -554,27 +745,81 @@ mod tests {
         let vault = tempfile::tempdir().unwrap();
         let v = vault.path();
         send(v, "course", Some("course/calc-3"), "Calc 3", &[]).await;
-        send(v, "session", Some("session/calc-3/4"), "Calc 3 class 4", &[("PART_OF", "course/calc-3")]).await;
-        send(v, "session", Some("session/calc-3/6"), "Calc 3 class 6", &[("part of", "course/calc-3")]).await;
-        send(v, "topic", Some("topic/partial-derivatives"), "Partial derivatives", &[]).await;
-        let note4 = send(v, "note/class", None, "Class 4 notes", &[
-            ("TAKEN_AT", "session/calc-3/4"),
-            ("ABOUT", "topic/partial-derivatives"),
-            ("ABOUT", "topic/trigonometry"),
-        ]).await;
-        let rewrite = send(v, "note/rewrite", None, "Partial derivatives, in my words", &[
-            ("REVISES", &note4.id.to_string()),
-            ("ABOUT", "topic/partial-derivatives"),
-        ]).await;
-        let note6 = send(v, "note/class", None, "Class 6 notes", &[
-            ("TAKEN_AT", "session/calc-3/6"),
-            ("ABOUT", "topic/trigonometry"),
-        ]).await;
-        let paper = send(v, "paper", None, "A paper on gradients", &[("ABOUT", "topic/partial-derivatives")]).await;
+        send(
+            v,
+            "session",
+            Some("session/calc-3/4"),
+            "Calc 3 class 4",
+            &[("PART_OF", "course/calc-3")],
+        )
+        .await;
+        send(
+            v,
+            "session",
+            Some("session/calc-3/6"),
+            "Calc 3 class 6",
+            &[("part of", "course/calc-3")],
+        )
+        .await;
+        send(
+            v,
+            "topic",
+            Some("topic/partial-derivatives"),
+            "Partial derivatives",
+            &[],
+        )
+        .await;
+        let note4 = send(
+            v,
+            "note/class",
+            None,
+            "Class 4 notes",
+            &[
+                ("TAKEN_AT", "session/calc-3/4"),
+                ("ABOUT", "topic/partial-derivatives"),
+                ("ABOUT", "topic/trigonometry"),
+            ],
+        )
+        .await;
+        let rewrite = send(
+            v,
+            "note/rewrite",
+            None,
+            "Partial derivatives, in my words",
+            &[
+                ("REVISES", &note4.id.to_string()),
+                ("ABOUT", "topic/partial-derivatives"),
+            ],
+        )
+        .await;
+        let note6 = send(
+            v,
+            "note/class",
+            None,
+            "Class 6 notes",
+            &[
+                ("TAKEN_AT", "session/calc-3/6"),
+                ("ABOUT", "topic/trigonometry"),
+            ],
+        )
+        .await;
+        let paper = send(
+            v,
+            "paper",
+            None,
+            "A paper on gradients",
+            &[("ABOUT", "topic/partial-derivatives")],
+        )
+        .await;
 
         let records = crate::ledger::for_vault(v).unwrap().records().unwrap();
         let g = Graph::from_records(&records);
-        let (n4, rw, n6, pp) = (note4.node_id(), rewrite.node_id(), note6.node_id(), paper.node_id());
+        let (n4, rw, n6, pp) = (
+            note4.node_id(),
+            rewrite.node_id(),
+            note6.node_id(),
+            paper.node_id(),
+        );
 
         // The query itself.
         let mut expected = vec![n4.clone(), rw.clone()];
@@ -598,8 +843,15 @@ mod tests {
 
         // How a paper connects to the course: by meaning, and by folder.
         assert_eq!(
-            g.path(&pp, "course/calc-3", Direction::Both, &knowledge).unwrap(),
-            vec![pp.clone(), "topic/partial-derivatives".into(), n4.clone(), "session/calc-3/4".into(), "course/calc-3".into()]
+            g.path(&pp, "course/calc-3", Direction::Both, &knowledge)
+                .unwrap(),
+            vec![
+                pp.clone(),
+                "topic/partial-derivatives".into(),
+                n4.clone(),
+                "session/calc-3/4".into(),
+                "course/calc-3".into()
+            ]
         );
         assert_eq!(
             g.path(&pp, "course/calc-3", Direction::Both, &[]).unwrap(),
@@ -608,30 +860,66 @@ mod tests {
 
         // Odds and ends the hand diagram also implies.
         assert_eq!(g.node("course/calc-3").unwrap().props["title"], "Calc 3");
-        assert!(g.node(&n4).unwrap().labels.contains("note"), "note/class is labelled note");
-        assert!(g.node("topic/trigonometry").unwrap().labels.is_empty(), "linked, never received");
-        assert_eq!(g.edges_of(&rw, Direction::Out, Some("REVISES"))[0].to, n4, "a UUID link resolves to the envelope's node");
-        assert_eq!(g.edges_of(&pp, Direction::Out, Some("HAS_CONTENT")).len(), 1);
+        assert!(
+            g.node(&n4).unwrap().labels.contains("note"),
+            "note/class is labelled note"
+        );
+        assert!(
+            g.node("topic/trigonometry").unwrap().labels.is_empty(),
+            "linked, never received"
+        );
+        assert_eq!(
+            g.edges_of(&rw, Direction::Out, Some("REVISES"))[0].to,
+            n4,
+            "a UUID link resolves to the envelope's node"
+        );
+        assert_eq!(
+            g.edges_of(&pp, Direction::Out, Some("HAS_CONTENT")).len(),
+            1
+        );
     }
 
     #[tokio::test]
     async fn a_bad_link_label_records_none_of_the_envelopes_links() {
         let vault = tempfile::tempdir().unwrap();
-        let mut e = Envelope::new(Source::Manual, "note", Payload::Text("x".into()), None::<&str>);
+        let mut e = Envelope::new(
+            Source::Manual,
+            "note",
+            Payload::Text("x".into()),
+            None::<&str>,
+        );
         e.links = vec![
-            LinkSpec { label: "ABOUT".into(), to: "topic/a".into() },
-            LinkSpec { label: "about!".into(), to: "topic/b".into() },
+            LinkSpec {
+                label: "ABOUT".into(),
+                to: "topic/a".into(),
+            },
+            LinkSpec {
+                label: "about!".into(),
+                to: "topic/b".into(),
+            },
         ];
-        let mut route = Route::new("t", vec![Stop { nest_id: "40".into(), hops: vec![Hop::Link] }]);
+        let mut route = Route::new(
+            "t",
+            vec![Stop {
+                nest_id: "40".into(),
+                hops: vec![Hop::Link],
+            }],
+        );
         assert!(route.run(vault.path(), Some(&e)).await.is_err());
 
-        let records = crate::ledger::for_vault(vault.path()).unwrap().records().unwrap();
+        let records = crate::ledger::for_vault(vault.path())
+            .unwrap()
+            .records()
+            .unwrap();
         assert!(records.iter().all(|r| r.event.kind != EventKind::Linked));
     }
 
     #[test]
     fn edges_csv_quotes_awkward_fields() {
         let g = Graph::from_records(&[linked(1, "a,b", "ABOUT", "say \"hi\"")]);
-        assert_eq!(g.edges_csv(), "source,target,label,seq\n\"a,b\",\"say \"\"hi\"\"\",ABOUT,1\n");
+        assert_eq!(
+            g.edges_csv(),
+            "source,target,label,seq\n\"a,b\",\"say \"\"hi\"\"\",ABOUT,1\n"
+        );
     }
 }
