@@ -5,6 +5,7 @@ mod attendant;
 mod blobs;
 mod clean_file;
 mod coffer;
+mod coffer_push;
 mod cleanup;
 mod cli;
 mod dodo;
@@ -54,8 +55,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return migrate::run(&cli_args[2..]);
     }
     if cli_args.get(1).map(String::as_str) == Some("coffer") {
+        if matches!(cli_args.get(2).map(String::as_str), Some("status") | Some("push")) {
+            return coffer_push::cli(&cli_args[2..]);
+        }
         if cli_args.get(2).map(String::as_str) != Some("init") {
-            return Err("usage: mailroom coffer init   (creates the coffer nests in $MAILROOM_VAULT)".into());
+            return Err("usage: mailroom coffer init | status --to DEST | push --to DEST [--dry-run] [--max-size 100M]".into());
         }
         let vault = std::env::var("MAILROOM_VAULT").map_err(|_| "set MAILROOM_VAULT")?;
         let written = coffer::init(Path::new(&vault))?;

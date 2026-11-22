@@ -58,6 +58,18 @@ pub async fn put(contents: &Path, src: &Path, expected_hash: &str) -> anyhow::Re
     Ok(rel)
 }
 
+/// `put`, for callers outside the async runtime: the same verified copy,
+/// on the current thread.
+pub fn put_blocking(contents: &Path, src: &Path, expected_hash: &str) -> anyhow::Result<PathBuf> {
+    check_hash_shape(expected_hash)?;
+    let rel = rel_path(expected_hash);
+    let dest = contents.join(&rel);
+    if !dest.exists() {
+        copy_verified(src, &dest, expected_hash)?;
+    }
+    Ok(rel)
+}
+
 /// Re-hash a stored blob and compare it with its name.
 /// Ok(false) means the bytes on disk no longer match.
 pub async fn verify(contents: &Path, hash: &str) -> anyhow::Result<bool> {
