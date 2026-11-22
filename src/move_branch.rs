@@ -402,6 +402,7 @@ mod tests {
             known_tags: Vec::new(),
             call_number: None,
             schema_version: None,
+            intake: None,
         }
     }
 

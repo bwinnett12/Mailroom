@@ -96,6 +96,15 @@ pub struct Manifest {
     /// coffer::LAYOUT_VERSION.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_version: Option<u32>,
+
+    /// Files dropped directly into this nest's folder are taken in as this
+    /// data type by `mailroom adopt` (e.g. "media/book"): their bytes go to
+    /// the coffer and a pointer takes their place. The data type's route
+    /// in routes.toml decides what else happens. None: files dropped here
+    /// are left alone. In a Rookery (mailroom.mints_subnests), each file
+    /// gets its own child nest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intake: Option<String>,
 }
 impl Manifest {
     /// A bare nest: just an id, a name and a kind.
@@ -114,6 +123,7 @@ impl Manifest {
             known_tags: Vec::new(),
             call_number: None,
             schema_version: None,
+            intake: None,
         }
     }
 

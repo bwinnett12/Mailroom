@@ -7,6 +7,7 @@
 // main.rs calls routes::router(state) and gets back one fully
 // configured Router ready to hand to Axum.
 
+pub mod adopt;
 pub mod api;
 pub mod envelope;
 // Declare the envelope submodule.
@@ -65,6 +66,7 @@ pub fn router(state: Arc<AppState>) -> Router {
 
         // ── Attach state ──────────────────────────────────────────────
         .merge(graph::routes())
+        .merge(adopt::routes())
         .with_state(state)
 }
 

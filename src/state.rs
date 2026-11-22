@@ -216,15 +216,4 @@ impl AppState {
             router: std::sync::Arc::new(router),
         }
     }
-
-    /// A nest's real folder in the vault: where its `nest` file was found,
-    /// or <vault>/<effective_path> for a nest registered without one.
-    /// Entries are stored here; file bytes go to the coffer.
-    pub async fn nest_dir(&self, manifest: &crate::manifest::Manifest) -> PathBuf {
-        self.registry
-            .read()
-            .await
-            .nest_dir(&self.vault_root, &manifest.id)
-            .unwrap_or_else(|| self.vault_root.join(manifest.effective_path()))
-    }
 }

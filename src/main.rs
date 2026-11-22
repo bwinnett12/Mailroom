@@ -1,5 +1,6 @@
 // src/main.rs
 
+mod adopt;
 mod attendant;
 mod blobs;
 mod clean_file;
@@ -45,6 +46,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if cli_args.get(1).map(String::as_str) == Some("move-branch") {
         return cli::move_branch(&cli_args[2..]);
+    }
+    if cli_args.get(1).map(String::as_str) == Some("adopt") {
+        return adopt::cli(&cli_args[2..]).await;
     }
     if cli_args.get(1).map(String::as_str) == Some("migrate") {
         return migrate::run(&cli_args[2..]);

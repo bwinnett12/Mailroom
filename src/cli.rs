@@ -180,6 +180,7 @@ fn blank_manifest(id: &str, name: &str, kind: NodeKind) -> Manifest {
         known_tags: Vec::new(),
         call_number: None,
         schema_version: None,
+        intake: None,
     }
 }
 

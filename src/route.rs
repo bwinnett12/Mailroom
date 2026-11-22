@@ -113,6 +113,8 @@ pub struct Route {
     /// Envelopes produced by Emit hops, waiting for the caller to dispatch
     /// them. Empty until the route has run.
     pub emitted: Vec<Envelope>,
+    /// Files written by Store hops (the entry or pointer, not its .meta.json).
+    pub stored: Vec<std::path::PathBuf>,
 }
 
 impl Route {
@@ -125,6 +127,7 @@ impl Route {
             status: RouteStatus::NotStarted,
             watchers: Vec::new(),
             emitted: Vec::new(),
+            stored: Vec::new(),
         }
     }
 
@@ -255,8 +258,8 @@ impl Route {
             record_to_watchers(vault_root, &self.watchers, Channel::Logs, &arrival);
             last_event = Some(arrival.event_id);
 
-            let emitted = match run_stop(&stop, vault_root, envelope).await {
-                Ok(emitted) => emitted,
+            let (emitted, stored) = match run_stop(&stop, vault_root, envelope).await {
+                Ok(out) => out,
                 Err(e) => {
                     let failure = Event::new(
                         &previous_nest, &stop.nest_id, last_event, envelope_id,
@@ -292,6 +295,7 @@ impl Route {
                 return Err(anyhow::anyhow!(reason));
             }
             self.emitted.extend(emitted);
+            self.stored.extend(stored);
 
             previous_nest = stop.nest_id.clone();
         }
@@ -398,8 +402,9 @@ async fn run_stop(
     stop: &Stop,
     vault_root: &std::path::Path,
     envelope: Option<&Envelope>,
-) -> anyhow::Result<Vec<Envelope>> {
+) -> anyhow::Result<(Vec<Envelope>, Vec<std::path::PathBuf>)> {
     let mut current_nest_id = stop.nest_id.clone();
+    let mut stored: Vec<std::path::PathBuf> = Vec::new();
     let mut last_script_output: Option<String> = None;
     let mut last_receipt: Option<serde_json::Value> = None;
     let mut emitted: Vec<Envelope> = Vec::new();
@@ -512,7 +517,8 @@ async fn run_stop(
 
                 // Entries go into the nest's folder; file bytes go into the
                 // vault's coffer (see coffer.rs).
-                crate::store::store(envelope, vault_root, nest_dir).await?;
+                let written = crate::store::store(envelope, vault_root, nest_dir).await?;
+                stored.push(written.content_path);
             }
             Hop::Link | Hop::LinkReplace => {
                 let envelope = envelope.ok_or_else(|| {
@@ -604,7 +610,24 @@ async fn run_stop(
         }
     }
 
-    Ok(emitted)
+    Ok((emitted, stored))
+}
+
+/// Store one envelope into one nest through a one-stop route, so it is in
+/// the ledger and the graph like anything a configured route delivers.
+/// For handlers that pick the nest themselves (/envelope, /journal, the
+/// attendant). Returns the files the Store hop wrote.
+pub async fn store_ledgered(
+    vault_root: &std::path::Path,
+    envelope: &Envelope,
+    nest_id: &str,
+) -> anyhow::Result<Vec<std::path::PathBuf>> {
+    let mut route = Route::new(
+        "intake",
+        vec![Stop { nest_id: nest_id.to_string(), hops: vec![Hop::Store] }],
+    );
+    route.run(vault_root, Some(envelope)).await?;
+    Ok(route.stored)
 }
 
 /// Build one envelope from an item an Emit hop was handed. The item must
@@ -686,6 +709,7 @@ mod tests {
             known_tags: Vec::new(),
             call_number: None,
             schema_version: None,
+            intake: None,
         }
     }
 

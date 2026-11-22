@@ -179,6 +179,7 @@ impl EntryMeta {
 #[derive(Debug)]
 pub struct WriteResult {
     pub content_path: PathBuf,
+    #[allow(dead_code)] // read by tests; kept for callers that want the sidecar
     pub meta_path: PathBuf,
 }
 
@@ -236,10 +237,14 @@ pub async fn store(
                 .ok_or_else(|| anyhow::anyhow!("a file payload always has a content hash"))?;
             let coffer = crate::coffer::for_vault(vault_root)?;
             crate::blobs::put(&coffer.contents, src_path, hash).await?;
-            let reference = format!(
-                "ref: sha256:{hash}\noriginal: {}\n",
-                src_path.display()
-            );
+            // "original" is where the file came from. Adopt moves the file
+            // into the coffer before the route runs, so it says where.
+            let original = envelope
+                .meta
+                .get("original_path")
+                .cloned()
+                .unwrap_or_else(|| src_path.display().to_string());
+            let reference = format!("ref: sha256:{hash}\noriginal: {original}\n");
             fs::write(&content_path, reference).await?;
         }
         _ => write_payload(&envelope.payload, &content_path).await?,

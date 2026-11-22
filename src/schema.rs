@@ -36,6 +36,7 @@ fn schema_to_orchard(node: &SchemaNode) -> Nest {
         known_tags: Vec::new(), 
         call_number: None,
         schema_version: None,
+        intake: None,
     };
     Nest {
         manifest,

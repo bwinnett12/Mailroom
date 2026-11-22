@@ -29,7 +29,6 @@ use crate::{
     envelope::{InboundEnvelope, Payload, Source},
     inference::InferenceClient,
     state::AppState,
-    store,
 };
 
 // ── POST /journal ─────────────────────────────────────────────────────────────
@@ -86,16 +85,16 @@ pub async fn write(
         }
     };
 
-    let nest_dir = registry
-        .nest_dir(&state.vault_root, &manifest.id)
-        .unwrap_or_else(|| state.vault_root.join(manifest.effective_path()));
-
-    match store::store(&envelope, &state.vault_root, &nest_dir).await {
-        Ok(result) => {
-            tracing::info!(file = %result.content_path.display(), "journal entry written");
+    // Through a route, so the entry is in the ledger and the graph.
+    let nest_id = manifest.id.clone();
+    drop(registry);
+    match crate::route::store_ledgered(&state.vault_root, &envelope, &nest_id).await {
+        Ok(written) => {
+            let file = written.first().map(|p| p.display().to_string()).unwrap_or_default();
+            tracing::info!(file = %file, "journal entry written");
             (StatusCode::CREATED, Json(serde_json::json!({
                 "envelope_id": envelope.id.to_string(),
-                "file":        result.content_path.display().to_string(),
+                "file":        file,
                 "jd_address":  jd_address,
             }))).into_response()
         }

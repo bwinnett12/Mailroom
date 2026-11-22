@@ -30,7 +30,6 @@ use crate::{
     inference::InferenceClient,
     manifest::Manifest,
     state::AppState,
-    store,
 };
 
 // ── Response types ────────────────────────────────────────────────────────────
@@ -193,11 +192,10 @@ pub async fn receive(
                                         // We update jd_address so the meta sidecar
                                         // records the classified address, not None.
 
-                                        let nest_dir = state.nest_dir(&manifest).await;
-                                        match store::store(&classified, &state.vault_root, &nest_dir).await {
-                                            Ok(result) => {
+                                        match crate::route::store_ledgered(&state.vault_root, &classified, &manifest.id).await {
+                                            Ok(written) => {
                                                 tracing::info!(
-                                                    content = %result.content_path.display(),
+                                                    content = ?written.first(),
                                                     "classified envelope written to disk"
                                                 );
                                             }
@@ -336,16 +334,14 @@ pub async fn receive(
 								}
 							}
 						} else {
-							let nest_dir = state.nest_dir(&manifest).await;
 							// e.g. "34.2_Journal" or "34_My-story/34.2_Journal"
 							// The manifest tells us where this node lives on disk.
 
-							match store::store(&envelope, &state.vault_root, &nest_dir).await {
-								Ok(result) => {
+							match crate::route::store_ledgered(&state.vault_root, &envelope, &manifest.id).await {
+								Ok(written) => {
 									tracing::info!(
-										content = %result.content_path.display(),
-										meta    = %result.meta_path.display(),
-										"written to disk"
+										content = ?written.first(),
+																				"written to disk"
 									);
 								}
 								Err(e) => {
@@ -531,10 +527,9 @@ pub async fn upload(
             }
         }
     } else {
-        let nest_dir = state.nest_dir(&manifest).await;
-        match store::store(&envelope, &state.vault_root, &nest_dir).await {
-            Ok(result) => {
-                tracing::info!(content = %result.content_path.display(), meta = %result.meta_path.display(), "uploaded file written to disk");
+        match crate::route::store_ledgered(&state.vault_root, &envelope, &manifest.id).await {
+            Ok(written) => {
+                tracing::info!(content = ?written.first(), "uploaded file written to disk");
             }
             Err(e) => {
                 tracing::error!(error = %e, id = %envelope.id, "failed to write uploaded envelope to disk");

@@ -78,73 +78,86 @@ pub async fn intake(
 
     // ── Mint a fresh child Nest ──────────────────────────────────────────
     let name = child_slug(envelope, &state.title_cleanup);
+    let (child_manifest, _dir) = {
+        let mut registry = state.registry.write().await;
+        mint_child(
+            &state.vault_root,
+            &mut registry,
+            gate,
+            &child_id,
+            &name,
+            &envelope.data_type,
+            envelope.meta.get("call_number").cloned(),
+        )?
+    };
+
+    // Through a route, so the delivery is in the ledger and the graph.
+    crate::route::store_ledgered(&state.vault_root, envelope, &child_id).await?;
+
+    Ok(child_manifest)
+}
+
+/// Mint the child nest `child_id` inside `gate`'s real folder, or return it
+/// if the registry already has it. The child is a leaf that accepts
+/// `data_type`; its folder is `<gate folder>/<child_id>_<name>`. Registers
+/// it (with its folder) so the next lookup finds it without a restart.
+/// Shared by the attendant (intake over HTTP) and adopt (files dropped
+/// into a Rookery). Returns the manifest and its folder relative to the
+/// vault.
+pub fn mint_child(
+    vault_root: &std::path::Path,
+    registry: &mut crate::registry::Registry,
+    gate: &Manifest,
+    child_id: &str,
+    name: &str,
+    data_type: &str,
+    call_number: Option<String>,
+) -> anyhow::Result<(Manifest, std::path::PathBuf)> {
+    if let (Some(existing), Some(dir)) = (registry.get(child_id).cloned(), registry.dir_of(child_id)) {
+        return Ok((existing, dir));
+    }
 
     // The child goes inside the gate's real folder (a book under
     // 52_media/52-B_books, not a stray 52-B_books/ at the vault root).
     // `path` records the full path relative to the vault, the convention
     // documented on the field itself, so effective_path() is right too.
-    let gate_dir = state
-        .registry
-        .read()
-        .await
+    let gate_dir = registry
         .dir_of(&gate.id)
         .unwrap_or_else(|| std::path::PathBuf::from(gate.effective_path()));
-    let folder_name = format!("{child_id}_{name}");
-    let child_rel = gate_dir.join(&folder_name);
+    let child_rel = gate_dir.join(format!("{child_id}_{name}"));
     let full_path = child_rel.to_string_lossy().replace('\\', "/");
 
-    let child_manifest = Manifest {
-        id:   child_id.clone(),
-        name: name.clone(),
-        path: Some(full_path),
-        kind: NodeKind::Leaf,
-        accepts: vec![envelope.data_type.clone()],
-        store: Some(StoreKind::Overwrite),
-        routing: None,
-        library: None,
-        mailroom: Some(MailroomConfig {
-            active: true,
-            requires_auth: false,
-            notify_on_write: false,
-            ai_classify: false,
-            mints_subnests: false, // a book doesn't itself mint further subnests
-            child_addressing: None,
-        }),
-        about: None,
-        known_tags: Vec::new(),
-        call_number: envelope.meta.get("call_number").cloned(),
-        schema_version: None,
-    };
+    let mut child_manifest = Manifest::stub(child_id, name, NodeKind::Leaf);
+    child_manifest.path = Some(full_path);
+    child_manifest.accepts = vec![data_type.to_string()];
+    child_manifest.store = Some(StoreKind::Overwrite);
+    child_manifest.mailroom = Some(MailroomConfig {
+        active: true,
+        requires_auth: false,
+        notify_on_write: false,
+        ai_classify: false,
+        mints_subnests: false, // a book doesn't itself mint further subnests
+        child_addressing: None,
+    });
+    child_manifest.call_number = call_number;
 
-    // create_orchard() already exists and already does exactly this —
-    // previously only ever called at bootstrap from generate_fresh_tree().
-    // A one-node slice reuses it unchanged for a single runtime mint.
-    // Parent is the vault root, not the gate's own directory —
-    // child_manifest.path is already the full relative path (including
-    // the gate's own folder), so create_station's own
-    // parent_path.join(effective_path()) resolves correctly without
-    // double-joining the gate's prefix.
+    // create_station() is what generate_fresh_tree() uses at bootstrap; a
+    // one-node slice reuses it for a single runtime mint. Its parent is the
+    // vault root, because `path` is already the full relative path.
     let node = Nest {
         manifest: child_manifest.clone(),
         children: Vec::new(),
     };
-    create_station(&node, &state.vault_root)?;
+    create_station(&node, vault_root)?;
 
     tracing::info!(
-        id       = %envelope.id,
         child_id = %child_id,
-        path     = %state.vault_root.join(&child_rel).display(),
+        path     = %vault_root.join(&child_rel).display(),
         "minted new subnest"
     );
 
-    // Register it so the *next* lookup (including the store() call right
-    // below, which goes through the same registry-driven path lookup
-    // logic other Nests use) can find it without a server restart.
-    state.registry.write().await.insert_at(child_id.clone(), child_manifest.clone(), child_rel.clone());
-
-    store::store(envelope, &state.vault_root, &state.vault_root.join(&child_rel)).await?;
-
-    Ok(child_manifest)
+    registry.insert_at(child_id.to_string(), child_manifest.clone(), child_rel.clone());
+    Ok((child_manifest, child_rel))
 }
 
 /// content_hash addressing: `{gate_id}-{first 16 hex chars of the sha256}`.
@@ -153,6 +166,10 @@ pub async fn intake(
 /// with 16 it stays below one in a million past 6 million items. Ids
 /// already issued with 8 chars stay valid: an id is read from its nest
 /// file, never re-derived.
+pub fn child_id_for_hash(gate: &Manifest, hash: &str) -> String {
+    format!("{}-{}", gate.id, &hash[..16])
+}
+
 async fn content_hash_child_id(gate: &Manifest, envelope: &Envelope) -> anyhow::Result<String> {
     let hash = store::compute_content_hash(&envelope.payload)
         .await?
@@ -163,7 +180,7 @@ async fn content_hash_child_id(gate: &Manifest, envelope: &Envelope) -> anyhow::
             )
         })?;
 
-    Ok(format!("{}-{}", gate.id, &hash[..16]))
+    Ok(child_id_for_hash(gate, &hash))
 }
 
 /// A short human-readable slug for the child's folder name — best-effort

@@ -355,6 +355,11 @@ async fn check(State(state): State<Arc<AppState>>) -> Reply {
             .push(format!("blob {h}: bytes no longer match their hash"));
     }
 
+    let waiting = {
+        let registry = state.registry.read().await;
+        crate::adopt::waiting(&state.vault_root, &registry, &state.router, crate::adopt::SETTLE).len()
+    };
+
     let status = if report.problems.is_empty() {
         StatusCode::OK
     } else {
@@ -371,6 +376,10 @@ async fn check(State(state): State<Arc<AppState>>) -> Reply {
             "dangling_parents": report.dangling_parents,
             "snapshot": report.snapshot,
             "blobs": { "verified": verified, "mismatched": mismatched.len(), "not_stored_here": absent },
+            // Files dropped into intake nests, not yet taken in. Not a
+            // problem: they wait for `mailroom adopt`. Never committed whole
+            // thanks to the nests' .gitignore.
+            "intake_waiting": waiting,
         })),
     )
         .into_response())

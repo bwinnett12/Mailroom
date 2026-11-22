@@ -11,4 +11,8 @@
   <button type="submit">Send</button>
 </form>
 <div id="result"></div>
+
+<h2>Waiting to be taken in</h2>
+<p>Files dropped into an intake nest's folder. Taking them in moves their bytes to the coffer and leaves a pointer.</p>
+<div id="adopt" hx-get="/adopt/panel" hx-trigger="load" hx-swap="innerHTML"></div>
 {% endblock %}
