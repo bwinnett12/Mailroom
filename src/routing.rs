@@ -76,7 +76,16 @@ struct HopDef {
     store: Option<bool>,
     log: Option<String>,
     emit: Option<bool>,
-    link: Option<bool>,
+    link: Option<LinkDef>,
+}
+
+/// `link = true` or `link = "add"`: links only add.
+/// `link = "replace"`: the envelope's links become the node's full set.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum LinkDef {
+    Flag(bool),
+    Mode(String),
 }
 
 impl HopDef {
@@ -108,11 +117,13 @@ impl HopDef {
             return Ok(Hop::Emit);
         }
 
-        if let Some(link) = self.link {
-            if !link {
-                bail!("hop '{name}': link must be true when set");
-            }
-            return Ok(Hop::Link);
+        if let Some(link) = &self.link {
+            return match link {
+                LinkDef::Flag(true) => Ok(Hop::Link),
+                LinkDef::Mode(m) if m == "add" => Ok(Hop::Link),
+                LinkDef::Mode(m) if m == "replace" => Ok(Hop::LinkReplace),
+                _ => bail!("hop '{name}': link must be true, \"add\" or \"replace\""),
+            };
         }
 
         if self.store != Some(true) {
@@ -500,5 +511,27 @@ mod tests {
         );
         let err = RoutingTable::from_toml(&bad, Path::new("/vault"), &registry()).unwrap_err();
         assert!(format!("{err:#}").contains("not found in registry"), "got: {err:#}");
+    }
+
+    #[test]
+    fn link_hops_accept_true_add_and_replace() {
+        let text = format!(
+            "{GOOD}\n[hops.a]\nlink = true\n[hops.b]\nlink = \"add\"\n[hops.c]\nlink = \"replace\"\n\
+             [[routes]]\ndata_type = \"text/recipe\"\ndodo = \"upkeep\"\nnest = \"22\"\nhops = [\"a\", \"b\", \"c\"]\nskip_defaults = true\n"
+        );
+        let table = RoutingTable::from_toml(&text, Path::new("/vault"), &registry()).unwrap();
+        let (_, route) = table.resolve("text/recipe").unwrap();
+        assert!(matches!(route.hops[0], Hop::Link));
+        assert!(matches!(route.hops[1], Hop::Link));
+        assert!(matches!(route.hops[2], Hop::LinkReplace));
+    }
+
+    #[test]
+    fn an_unknown_link_mode_fails_at_load() {
+        for bad in ["link = false", "link = \"merge\""] {
+            let text = format!("{GOOD}\n[hops.x]\n{bad}\n");
+            let err = RoutingTable::from_toml(&text, Path::new("/vault"), &registry()).unwrap_err();
+            assert!(format!("{err:#}").contains("link must be"), "{bad}: {err:#}");
+        }
     }
 }

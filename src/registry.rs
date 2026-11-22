@@ -89,6 +89,10 @@ impl Registry {
             // Later we might want to log these errors instead of ignoring them.
         	{
             let path = entry.path();
+            // A directory named "nest" is not a manifest; only files are read.
+            if !entry.file_type().is_file() {
+                continue;
+            }
             // entry.path() returns a &Path — a borrowed reference to the path.
             // We don't need to own it here, just inspect it.
 

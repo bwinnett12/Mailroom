@@ -59,7 +59,17 @@ pub enum Hop {
 
     /// Write one Linked event to the ledger for each link the envelope
     /// declares (Envelope::links). This is how edges get into the graph.
+    /// Links only add: a link dropped from a re-sent envelope stays.
     Link,
+
+    /// Like Link, but the envelope's links become the node's complete set
+    /// of meaning links. Any meaning edge out of the node that the
+    /// envelope no longer declares gets an Unlinked event, and links that
+    /// already exist are not written again. Re-importing a file that lost
+    /// a link removes the edge; re-importing an unchanged file writes
+    /// nothing. Mailroom's own edges (VISITED, HAS_CONTENT, EMITTED_FROM)
+    /// and edges pointing *into* the node are left alone.
+    LinkReplace,
 }
 
 /// One Station a Route visits, and what to do once there.
@@ -342,6 +352,48 @@ fn link_facts(from: &str, link: &crate::envelope::LinkSpec) -> anyhow::Result<cr
     Ok(crate::event::LinkFacts { from: from.to_string(), label, to })
 }
 
+/// What a LinkReplace hop must write so that `from`'s meaning links become
+/// exactly `declared`: (edges to unlink, links to add).
+///
+/// Targets are compared after resolving, the way the graph stores them: a
+/// link to "env:<uuid>" of an envelope that claimed a key is the same edge
+/// as a link to that key. Declared links that already exist are dropped
+/// from the add list, as are repeats within `declared`, so re-sending an
+/// unchanged envelope writes nothing.
+fn replace_plan(
+    graph: &crate::graph::Graph,
+    from: &str,
+    declared: Vec<crate::event::LinkFacts>,
+) -> (Vec<crate::event::LinkFacts>, Vec<crate::event::LinkFacts>) {
+    use std::collections::HashSet;
+
+    let mut wanted: HashSet<(String, String)> = HashSet::new();
+    let mut add = Vec::new();
+    for link in declared {
+        let key = (link.label.clone(), graph.resolve_target(&link.to));
+        if !wanted.insert(key.clone()) {
+            continue; // listed twice
+        }
+        if !graph.has_edge(from, &key.0, &key.1) {
+            add.push(link);
+        }
+    }
+
+    let unlink = graph
+        .edges_of(from, crate::graph::Direction::Out, None)
+        .into_iter()
+        .filter(|e| !crate::graph::centrality::SYSTEM_LABELS.contains(&e.label.as_str()))
+        .filter(|e| !wanted.contains(&(e.label.clone(), e.to.clone())))
+        .map(|e| crate::event::LinkFacts {
+            from: e.from.clone(),
+            label: e.label.clone(),
+            to: e.to.clone(),
+        })
+        .collect();
+
+    (unlink, add)
+}
+
 async fn run_stop(
     stop: &Stop,
     vault_root: &std::path::Path,
@@ -467,7 +519,7 @@ async fn run_stop(
                 // route-stored files land in <vault>/by-hash/.
                 crate::store::store(envelope, vault_root, &rel).await?;
             }
-            Hop::Link => {
+            Hop::Link | Hop::LinkReplace => {
                 let envelope = envelope.ok_or_else(|| {
                     anyhow::anyhow!("Link hop needs an envelope whose links to record, but this Route was run with envelope: None")
                 })?;
@@ -480,14 +532,31 @@ async fn run_stop(
                     .map(|l| link_facts(&from, l))
                     .collect::<anyhow::Result<Vec<_>>>()?;
                 let ledger = crate::ledger::for_vault(vault_root)?;
-                for link in links {
+
+                let (unlink, link) = if matches!(hop, Hop::LinkReplace) {
+                    ledger.with_graph(|g| replace_plan(g, &from, links))
+                } else {
+                    (Vec::new(), links)
+                };
+
+                let record = |kind: EventKind, facts: crate::event::LinkFacts, detail: Option<String>| {
                     let mut event = Event::new(
                         &current_nest_id, &current_nest_id, None, Some(envelope.id),
-                        EventKind::Linked, None,
+                        kind, detail,
                     )
                     .about(envelope.content_hash.clone(), envelope.caused_by);
-                    event.link = Some(link);
-                    ledger.append(event)?;
+                    event.link = Some(facts);
+                    ledger.append(event).map(|_| ())
+                };
+                for facts in unlink {
+                    record(
+                        EventKind::Unlinked,
+                        facts,
+                        Some("replaced: no longer declared by the envelope".into()),
+                    )?;
+                }
+                for facts in link {
+                    record(EventKind::Linked, facts, None)?;
                 }
             }
             Hop::Emit => {
@@ -956,5 +1025,135 @@ mod tests {
         assert_eq!(errors[0]["kind"], "error");
         assert_eq!(errors[0]["to"], "22");
         assert_eq!(errors[0]["caused_by"], arrivals[0]["event_id"]);
+    }
+
+    // ── LinkReplace ─────────────────────────────────────────────────────
+
+    /// Send an envelope with this key and these links through one stop
+    /// running `hop`.
+    async fn send_links(vault: &Path, key: &str, links: &[(&str, &str)], hop: Hop) -> anyhow::Result<()> {
+        let mut e = Envelope::new(
+            Source::Manual,
+            "text/recipe",
+            Payload::Text(key.to_string()),
+            None::<&str>,
+        );
+        e.meta.insert("key".into(), key.into());
+        e.links = links
+            .iter()
+            .map(|(l, t)| crate::envelope::LinkSpec { label: l.to_string(), to: t.to_string() })
+            .collect();
+        let mut route = Route::new("test-dodo", vec![Stop { nest_id: "60".into(), hops: vec![hop] }]);
+        route.run(vault, Some(&e)).await
+    }
+
+    fn out_links(vault: &Path, from: &str) -> Vec<(String, String)> {
+        let ledger = crate::ledger::for_vault(vault).unwrap();
+        let mut found: Vec<(String, String)> = ledger.with_graph(|g| {
+            g.edges_of(from, crate::graph::Direction::Out, None)
+                .into_iter()
+                .map(|e| (e.label.clone(), e.to.clone()))
+                .collect()
+        });
+        found.sort();
+        found
+    }
+
+    fn count_kind(vault: &Path, kind: EventKind) -> usize {
+        let ledger = crate::ledger::for_vault(vault).unwrap();
+        ledger.records().unwrap().iter().filter(|r| r.event.kind == kind).count()
+    }
+
+    fn pair(l: &str, t: &str) -> (String, String) {
+        (l.to_string(), t.to_string())
+    }
+
+    #[tokio::test]
+    async fn link_replace_drops_links_the_envelope_no_longer_declares() {
+        let vault = tempfile::tempdir().unwrap();
+        let v = vault.path();
+        send_links(v, "recipe/soup", &[("USES", "ing/salt"), ("USES", "ing/onion")], Hop::Link).await.unwrap();
+
+        send_links(v, "recipe/soup", &[("USES", "ing/onion"), ("USES", "ing/leek")], Hop::LinkReplace).await.unwrap();
+
+        let links: Vec<_> = out_links(v, "recipe/soup")
+            .into_iter()
+            .filter(|(l, _)| l == "USES")
+            .collect();
+        assert_eq!(links, vec![pair("USES", "ing/leek"), pair("USES", "ing/onion")]);
+        assert_eq!(count_kind(v, EventKind::Unlinked), 1, "only salt is withdrawn");
+        let report = crate::ledger::for_vault(v).unwrap().verify();
+        assert!(report.problems.is_empty(), "live graph still matches replay: {:?}", report.problems);
+    }
+
+    #[tokio::test]
+    async fn plain_link_still_only_adds() {
+        let vault = tempfile::tempdir().unwrap();
+        let v = vault.path();
+        send_links(v, "recipe/stew", &[("USES", "ing/salt")], Hop::Link).await.unwrap();
+        send_links(v, "recipe/stew", &[("USES", "ing/beef")], Hop::Link).await.unwrap();
+        let uses = out_links(v, "recipe/stew").into_iter().filter(|(l, _)| l == "USES").count();
+        assert_eq!(uses, 2);
+        assert_eq!(count_kind(v, EventKind::Unlinked), 0);
+    }
+
+    #[tokio::test]
+    async fn resending_an_unchanged_envelope_with_replace_writes_no_link_events() {
+        let vault = tempfile::tempdir().unwrap();
+        let v = vault.path();
+        let links = [("USES", "ing/rice"), ("uses", "ing/rice"), ("SERVED_WITH", "recipe/beans")];
+        send_links(v, "recipe/rice", &links, Hop::LinkReplace).await.unwrap();
+        let linked = count_kind(v, EventKind::Linked);
+        assert_eq!(linked, 2, "the repeated USES ing/rice is written once");
+
+        send_links(v, "recipe/rice", &links, Hop::LinkReplace).await.unwrap();
+        assert_eq!(count_kind(v, EventKind::Linked), linked);
+        assert_eq!(count_kind(v, EventKind::Unlinked), 0);
+    }
+
+    #[tokio::test]
+    async fn replace_keeps_system_edges_and_edges_pointing_in() {
+        let vault = tempfile::tempdir().unwrap();
+        let v = vault.path();
+        send_links(v, "recipe/salsa", &[("USES", "ing/tomato")], Hop::Link).await.unwrap();
+        send_links(v, "recipe/tacos", &[("USES", "recipe/salsa")], Hop::Link).await.unwrap();
+
+        // Every link dropped.
+        send_links(v, "recipe/salsa", &[], Hop::LinkReplace).await.unwrap();
+
+        let out = out_links(v, "recipe/salsa");
+        assert!(out.iter().all(|(l, _)| l != "USES"), "got {out:?}");
+        assert!(out.iter().any(|(l, _)| l == "VISITED"), "system edges stay: {out:?}");
+        assert!(out.iter().any(|(l, _)| l == "HAS_CONTENT"), "system edges stay: {out:?}");
+        assert_eq!(out_links(v, "recipe/tacos").iter().filter(|(l, _)| l == "USES").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn replace_compares_envelope_targets_after_resolving_them() {
+        let vault = tempfile::tempdir().unwrap();
+        let v = vault.path();
+        // An envelope that claims a key; linking to its UUID is linking to the key.
+        let mut book = Envelope::new(Source::Manual, "media/book", Payload::Text("DDIA".into()), None::<&str>);
+        book.meta.insert("key".into(), "book/ddia".into());
+        let mut route = Route::new("test-dodo", vec![Stop { nest_id: "52".into(), hops: vec![] }]);
+        route.run(v, Some(&book)).await.unwrap();
+
+        send_links(v, "note/logs", &[("CITES", "book/ddia")], Hop::Link).await.unwrap();
+        let by_uuid = book.id.to_string();
+        send_links(v, "note/logs", &[("CITES", by_uuid.as_str())], Hop::LinkReplace).await.unwrap();
+
+        assert_eq!(count_kind(v, EventKind::Unlinked), 0, "same edge, just named by uuid");
+        assert!(out_links(v, "note/logs").contains(&pair("CITES", "book/ddia")));
+    }
+
+    #[tokio::test]
+    async fn a_bad_link_in_replace_mode_withdraws_nothing() {
+        let vault = tempfile::tempdir().unwrap();
+        let v = vault.path();
+        send_links(v, "recipe/pie", &[("USES", "ing/apple")], Hop::Link).await.unwrap();
+        let err = send_links(v, "recipe/pie", &[("USES", "ing/pear"), ("bad!label", "x")], Hop::LinkReplace).await;
+        assert!(err.is_err());
+        assert_eq!(count_kind(v, EventKind::Unlinked), 0);
+        assert!(out_links(v, "recipe/pie").contains(&pair("USES", "ing/apple")));
     }
 }

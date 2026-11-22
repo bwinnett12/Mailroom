@@ -218,6 +218,14 @@ impl Graph {
     }
 
     /// Is there an edge (from, label, to)?
+    /// The node a link target names, as the graph would store it: an
+    /// "env:<uuid>" of an envelope that claimed a key becomes that key;
+    /// anything else is returned as given. Read-only: unlike applying a
+    /// Linked event, this never creates a node.
+    pub fn resolve_target(&self, target: &str) -> NodeId {
+        self.resolve_existing(target)
+    }
+
     pub fn has_edge(&self, from: &str, label: &str, to: &str) -> bool {
         self.seen
             .contains(&(from.to_string(), label.to_string(), to.to_string()))
