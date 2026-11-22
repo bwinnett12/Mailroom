@@ -23,3 +23,9 @@ target/
 *.orig
 *.rej
 *.patch
+
+# Scratch output that ended up committed once (kept locally, never tracked)
+/home/
+/35_health/
+/temp
+Archive.zip

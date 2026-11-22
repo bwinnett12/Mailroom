@@ -77,7 +77,7 @@
 
             # ── Dev environment variables ───────────────────────────────
             # Override any of these in your shell before running cargo run.
-            export MAILROOM_LISTEN="0.0.0.0:3000"
+            export MAILROOM_LISTEN="127.0.0.1:3000"
             export MAILROOM_VAULT="/tmp/test-vault"
             export MAILROOM_LIBRARY_ROOT="/tmp/test-library"
             export MAILROOM_LLM_URL="http://ai.platatoo.com"
@@ -164,11 +164,13 @@
 
         listenAddr = lib.mkOption {
           type        = lib.types.str;
-          default     = "0.0.0.0:3000";
+          default     = "127.0.0.1:3000";
           description = ''
-            Address and port the Mailroom binds to.
-            Tailscale-only deployment: 0.0.0.0 is safe since the Pi
-            isn't directly internet-exposed.
+            Address and port the Mailroom binds to. Loopback by default:
+            each device's Mailroom is reached locally, and moving data
+            between devices is an explicit route, never an open port.
+            Set "0.0.0.0:3000" only if you mean to expose it (e.g. on
+            the tailnet).
           '';
         };
 

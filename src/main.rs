@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let vault_root =
         std::env::var("MAILROOM_VAULT").unwrap_or_else(|_| "/home/user/vault".to_string());
 
-    let addr = std::env::var("MAILROOM_LISTEN").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
+    let addr = std::env::var("MAILROOM_LISTEN").unwrap_or_else(|_| "127.0.0.1:3000".to_string()); // loopback: see flake.nix listenAddr
 
     if std::env::var("MAILROOM_GENERATE_SCHEMA").is_ok() {
         let schema_path = std::env::var("MAILROOM_SCHEMA_PATH")
