@@ -20,6 +20,9 @@ echo "building…"
 cargo build -q 2>/dev/null || { echo "cargo build failed — run 'cargo build' to see why"; exit 1; }
 
 mkdir -p "$V/60_kitchen/60-A_recipes" "$WORK/in"
+export MAILROOM_DEVICE=check   # fixed device name, so the ledger folder is known
+MAILROOM_VAULT=$V "$REPO/target/debug/mailroom" coffer init >/dev/null || { echo "coffer init failed"; exit 1; }
+LEDGER=$V/85_coffer/85-C_ledger/check; CONTENTS=$V/85_coffer/85-B_contents
 printf 'id = "60-A"\nname = "recipes"\nkind = "leaf"\naccepts = ["recipe", "doc"]\n' > "$V/60_kitchen/60-A_recipes/nest"
 cat > "$V/routes.toml" <<'EOF'
 [dodos.cook]
@@ -99,12 +102,12 @@ check "graph came from the snapshot"                 'grep -q "from_snapshot=Som
 check "check passes after restart"                   'ok'
 
 echo "5. damage the check must catch"
-B=$(find "$V/by-hash" -type f | head -1); chmod u+w "$B"; echo tampered > "$B"
+B=$(find "$CONTENTS" -type f ! -name nest | head -1); chmod u+w "$B"; echo tampered > "$B"
 R=$(curl -s -w '\n%{http_code}' "$URL/graph/check")
 check "tampered blob: 409 + named"                   '[ "$(code "$R")" = 409 ] && echo "$R" | grep -q "no longer match"'
 rm -f "$B"
 check "blob removed: not a problem, just absent"     'ok'
-sed -i '2s/"seq":2/"seq":99/' "$V/.mailroom/ledger/events.jsonl"
+sed -i '2s/"seq":2/"seq":99/' "$LEDGER/events.jsonl"
 R=$(curl -s -w '\n%{http_code}' "$URL/graph/check")
 check "edited ledger line: 409, does not read cleanly" '[ "$(code "$R")" = 409 ] && echo "$R" | grep -q "does not read cleanly"'
 

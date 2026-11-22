@@ -79,7 +79,6 @@
             # Override any of these in your shell before running cargo run.
             export MAILROOM_LISTEN="127.0.0.1:3000"
             export MAILROOM_VAULT="/tmp/test-vault"
-            export MAILROOM_LIBRARY_ROOT="/tmp/test-library"
             export MAILROOM_LLM_URL="http://ai.platatoo.com"
             export MAILROOM_CLASSIFY_MODEL="qwen_qwen3.5-0.8b"
             export MAILROOM_SUMMARISE_MODEL="qwen_qwen3.5-0.8b"
@@ -93,7 +92,6 @@
             echo "   Rust:    $(rustc --version)"
             echo "   LLM:     $MAILROOM_LLM_URL"
             echo "   Vault:   $MAILROOM_VAULT"
-            echo "   Library: $MAILROOM_LIBRARY_ROOT"
             echo ""
             echo "   Backend:"
             echo "     cargo run        → start the server"
@@ -151,6 +149,13 @@
       cfg = config.services.mailroom;
     in {
 
+      # libraryRoot is gone: entries live in their nests and file bytes in
+      # the vault's coffer (85-B_contents). Setting it is an error that says so.
+      imports = [
+        (lib.mkRemovedOptionModule [ "services" "mailroom" "libraryRoot" ]
+          "Mailroom no longer has a separate library. Entries live in their nests and file bytes in the vault's coffer; run `mailroom migrate` once to move an old library in.")
+      ];
+
       # ── Options ─────────────────────────────────────────────────────────
       options.services.mailroom = {
 
@@ -181,16 +186,6 @@
             Path to the local clone of your Obsidian vault.
             The Mailroom reads .mailroom manifests from here to build
             the registry at startup.
-          '';
-        };
-
-        libraryRoot = lib.mkOption {
-          type        = lib.types.str;
-          default     = "/var/lib/mailroom/library";
-          description = ''
-            Root directory where envelope content is written.
-            On Pi: local storage.
-            Eventually: /storage/Library (9P mount from Island).
           '';
         };
 
@@ -250,7 +245,6 @@
             If null, Mailroom falls back to env-var mode and reads:
               - MAILROOM_LISTEN
               - MAILROOM_VAULT
-              - MAILROOM_LIBRARY_ROOT
               - MAILROOM_LLM_URL
               - MAILROOM_CLASSIFY_MODEL
               - MAILROOM_SUMMARISE_MODEL
@@ -265,7 +259,6 @@
         # ── Create directories ─────────────────────────────────────────────
         systemd.tmpfiles.rules = [
           "d ${cfg.vaultPath}   0750 mailroom mailroom -"
-          "d ${cfg.libraryRoot} 0750 mailroom mailroom -"
         ];
 
         # ── Service user ───────────────────────────────────────────────────
@@ -294,7 +287,6 @@
             {
               MAILROOM_LISTEN          = cfg.listenAddr;
               MAILROOM_VAULT           = cfg.vaultPath;
-              MAILROOM_LIBRARY_ROOT    = cfg.libraryRoot;
               MAILROOM_LLM_URL         = cfg.llmUrl;
               MAILROOM_CLASSIFY_MODEL  = cfg.classifyModel;
               MAILROOM_SUMMARISE_MODEL = cfg.summariseModel;
@@ -321,7 +313,6 @@
             ProtectHome = true;
             ReadWritePaths = [
               cfg.vaultPath
-              cfg.libraryRoot
             ];
             PrivateTmp = true;
             PrivateDevices = true;

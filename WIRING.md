@@ -109,5 +109,6 @@ because `/envelope` already belongs to `envelope::receive`:
 - `Route::run` already resolves `Hop::Store` through
   `move_branch::find_nest_by_id`. The table's `nest` value must match a nest
   id, which startup validation guarantees.
-- Routes resolve the store target with `vault_root` as `library_root`. That's
-  the same caveat `route.rs` already documents.
+- Everything stores the same way: entries into the nest's real folder, file
+  bytes into the vault's coffer (`85-B_contents`), the ledger in
+  `85-C_ledger/<device>/`. See `src/coffer.rs`. There is no separate library.

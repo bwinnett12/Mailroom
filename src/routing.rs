@@ -364,6 +364,7 @@ mod tests {
             about: None,
             known_tags: Vec::new(),
             call_number: None,
+            schema_version: None,
         }
     }
 
@@ -459,6 +460,7 @@ mod tests {
     #[tokio::test]
     async fn dispatching_a_todo_stores_it_and_logs_it() {
         let vault = tempfile::tempdir().unwrap();
+        crate::coffer::init(vault.path()).unwrap();
 
         // The nest on disk, so the Store hop has somewhere to write.
         let nest_dir = vault.path().join("22_upkeep");

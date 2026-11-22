@@ -21,6 +21,9 @@ echo "building…"
 cargo build -q 2>/dev/null || { echo "cargo build failed — run 'cargo build' to see why"; exit 1; }
 
 mkdir -p "$V/60_kitchen/60-A_recipes" "$WORK/in"
+export MAILROOM_DEVICE=check   # fixed device name, so the ledger folder is known
+MAILROOM_VAULT=$V "$REPO/target/debug/mailroom" coffer init >/dev/null || { echo "coffer init failed"; exit 1; }
+LEDGER=$V/85_coffer/85-C_ledger/check; CONTENTS=$V/85_coffer/85-B_contents
 printf 'id = "60-A"\nname = "recipes"\nkind = "leaf"\naccepts = ["recipe", "doc"]\n' > "$V/60_kitchen/60-A_recipes/nest"
 cat > "$V/routes.toml" <<'EOF'
 [dodos.cook]
@@ -67,7 +70,7 @@ code() { echo "$1" | tail -1; }
 has_edge() { curl -s "$URL/graph/node?id=$1" | grep -q "\"label\":\"$2\",\"seq\":[0-9]*,\"to\":\"$3\""; }
 ok() { curl -s "$URL/graph/check" | grep -q '"ok":true'; }
 
-kinds() { grep -c "\"kind\":\"$1\"" "$V/.mailroom/ledger/events.jsonl"; }
+kinds() { grep -c "\"kind\":\"$1\"" "$LEDGER/events.jsonl"; }
 
 echo "1. first import"
 start run1

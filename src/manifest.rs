@@ -89,8 +89,34 @@ pub struct Manifest {
 
     #[serde(default)]
     pub call_number: Option<String>,
+
+    /// Version of the format this nest file (or, on the coffer's ledger
+    /// nest, the whole vault layout) is written in. None means 1, the
+    /// format every nest had before the field existed. See
+    /// coffer::LAYOUT_VERSION.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_version: Option<u32>,
 }
 impl Manifest {
+    /// A bare nest: just an id, a name and a kind.
+    pub fn stub(id: impl Into<String>, name: impl Into<String>, kind: NodeKind) -> Self {
+        Manifest {
+            id: id.into(),
+            name: name.into(),
+            path: None,
+            kind,
+            accepts: Vec::new(),
+            store: None,
+            routing: None,
+            library: None,
+            mailroom: None,
+            about: None,
+            known_tags: Vec::new(),
+            call_number: None,
+            schema_version: None,
+        }
+    }
+
     /// Returns the effective path for this node within /storage/Library.
     /// Uses the explicit `path` field if set, otherwise derives from id and name.
     /// Example: id="34.2", name="Journal" → "34.2_Journal"

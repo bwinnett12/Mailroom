@@ -30,6 +30,9 @@ BIN=$REPO/target/debug/mailroom
 
 # ── Throwaway vault: one nested nest (like Orchard), two routes ─────────────
 mkdir -p "$V/52_media/52-H_books" "$WORK/intake"
+export MAILROOM_DEVICE=check   # fixed device name, so the ledger folder is known
+MAILROOM_VAULT=$V "$REPO/target/debug/mailroom" coffer init >/dev/null || { echo "coffer init failed"; exit 1; }
+LEDGER=$V/85_coffer/85-C_ledger/check; CONTENTS=$V/85_coffer/85-B_contents
 cat > "$V/52_media/52-H_books/nest" <<'EOF'
 id = "52-H"
 name = "books"
@@ -77,20 +80,20 @@ dispatch() {
   curl -s -m "${3:-10}" -X POST "$URL/dispatch" -H 'content-type: application/json' \
     -d "{\"source\":\"manual\",\"data_type\":\"$1\",\"payload\":$2}"
 }
-ledger() { cat "$V/.mailroom/ledger/events.jsonl" 2>/dev/null; }
+ledger() { cat "$LEDGER/events.jsonl" 2>/dev/null; }
 logged() { sed 's/\x1b\[[0-9;]*m//g' "$WORK/$1.log" | grep -q "$2"; }  # log text without colour codes
 
 echo "1. server and ledger"
 check "server starts and /health answers" 'start run1'
-check "ledger file exists"                '[ -f "$V/.mailroom/ledger/events.jsonl" ]'
+check "ledger file exists"                '[ -f "$LEDGER/events.jsonl" ]'
 
 echo "2. blob store (same file sent twice, under two names)"
 R1=$(dispatch file/book "{\"kind\":\"file_path\",\"data\":\"$WORK/intake/calc3.pdf\"}")
 R2=$(dispatch file/book "{\"kind\":\"file_path\",\"data\":\"$WORK/intake/calc3-renamed-copy.pdf\"}")
-BLOB="$V/by-hash/${EXPECTED:0:2}/$EXPECTED"
+BLOB="$CONTENTS/${EXPECTED:0:2}/$EXPECTED"
 check "both dispatches completed"           '[ "$(echo "$R1$R2" | grep -o "\"Completed\"" | wc -l)" -eq 2 ]'
 check "response hash matches sha256sum"     'echo "$R1" | grep -q "$EXPECTED"'
-check "exactly one blob, named by its hash" '[ "$(find "$V/by-hash" -type f | wc -l)" -eq 1 ] && [ -f "$BLOB" ]'
+check "exactly one blob, named by its hash" '[ "$(find "$CONTENTS" -type f ! -name nest | wc -l)" -eq 1 ] && [ -f "$BLOB" ]'
 check "blob is read-only (444)"             '[ "$(stat -c %a "$BLOB")" = 444 ]'
 check "blob bytes match the original"       'cmp -s "$BLOB" "$WORK/intake/calc3.pdf"'
 check "two .ref files in the nest's real folder" '[ "$(ls "$V/52_media/52-H_books/entries/"*.ref 2>/dev/null | wc -l)" -eq 2 ]'

@@ -3,9 +3,11 @@
 // Content-addressed blob store. A file is stored once, under the SHA-256
 // of its bytes:
 //
-//   <library_root>/by-hash/2c/2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
-//                          ^^ first two hex chars: 256 subdirectories, so
-//                             no single directory holds every blob
+//   <coffer contents>/2c/2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+//                     ^^ first two hex chars: 256 subdirectories, so
+//                        no single directory holds every blob
+//
+// <coffer contents> is the 85-B_contents nest by default (see coffer.rs).
 //
 // Why by hash, not by name:
 //   - The same book dropped in twice, or on two machines, is one blob.
@@ -30,18 +32,18 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-/// Where a blob lives, relative to the library root.
+/// Where a blob lives, relative to the coffer's contents folder.
 pub fn rel_path(hash: &str) -> PathBuf {
-    PathBuf::from("by-hash").join(&hash[..2]).join(hash)
+    PathBuf::from(&hash[..2]).join(hash)
 }
 
 /// Copy `src` into the blob store under `expected_hash`. Returns the blob's
-/// path relative to the library root. If the blob already exists, nothing
+/// path relative to `contents`. If the blob already exists, nothing
 /// is copied.
-pub async fn put(library_root: &Path, src: &Path, expected_hash: &str) -> anyhow::Result<PathBuf> {
+pub async fn put(contents: &Path, src: &Path, expected_hash: &str) -> anyhow::Result<PathBuf> {
     check_hash_shape(expected_hash)?;
     let rel = rel_path(expected_hash);
-    let dest = library_root.join(&rel);
+    let dest = contents.join(&rel);
     if dest.exists() {
         tracing::debug!(blob = %rel.display(), "blob already stored");
         return Ok(rel);
@@ -58,9 +60,9 @@ pub async fn put(library_root: &Path, src: &Path, expected_hash: &str) -> anyhow
 
 /// Re-hash a stored blob and compare it with its name.
 /// Ok(false) means the bytes on disk no longer match.
-pub async fn verify(library_root: &Path, hash: &str) -> anyhow::Result<bool> {
+pub async fn verify(contents: &Path, hash: &str) -> anyhow::Result<bool> {
     check_hash_shape(hash)?;
-    let path = library_root.join(rel_path(hash));
+    let path = contents.join(rel_path(hash));
     let hash = hash.to_string();
     tokio::task::spawn_blocking(move || {
         let mut file = File::open(&path)?;
@@ -99,6 +101,16 @@ fn copy_verified(src: &Path, dest: &Path, expected: &str) -> anyhow::Result<()> 
         let _ = fs::remove_file(&tmp);
     }
     result
+}
+
+/// SHA-256 of a file on disk, hex. Blocking.
+pub fn hash_file(path: &Path) -> anyhow::Result<String> {
+    hash_reader(&mut File::open(path)?, None)
+}
+
+/// True if `name` looks like a blob's file name (64 lowercase hex chars).
+pub fn is_hash(name: &str) -> bool {
+    check_hash_shape(name).is_ok()
 }
 
 /// SHA-256 of everything readable from `input`, optionally copying the
@@ -160,7 +172,7 @@ mod tests {
 
         let rel = put(lib.path(), &src, HELLO).await.unwrap();
 
-        assert_eq!(rel, PathBuf::from(format!("by-hash/2c/{HELLO}")));
+        assert_eq!(rel, PathBuf::from(format!("2c/{HELLO}")));
         assert_eq!(fs::read_to_string(lib.path().join(&rel)).unwrap(), "hello");
         assert!(verify(lib.path(), HELLO).await.unwrap());
         assert!(src.exists(), "the original is copied, not moved");
@@ -176,7 +188,7 @@ mod tests {
         let rb = put(lib.path(), &b, HELLO).await.unwrap();
 
         assert_eq!(ra, rb);
-        let blobs: Vec<_> = fs::read_dir(lib.path().join("by-hash/2c")).unwrap().collect();
+        let blobs: Vec<_> = fs::read_dir(lib.path().join("2c")).unwrap().collect();
         assert_eq!(blobs.len(), 1, "no temp files left, no second copy");
     }
 
@@ -189,7 +201,7 @@ mod tests {
 
         assert!(err.to_string().contains("changed after it was received"), "{err}");
         assert!(!lib.path().join(rel_path(HELLO)).exists());
-        let leftovers = fs::read_dir(lib.path().join("by-hash/2c")).map(|d| d.count()).unwrap_or(0);
+        let leftovers = fs::read_dir(lib.path().join("2c")).map(|d| d.count()).unwrap_or(0);
         assert_eq!(leftovers, 0, "temp file cleaned up");
     }
 
@@ -217,27 +229,32 @@ mod tests {
         let src = file_with(lib.path(), "x", "hello");
         assert!(put(lib.path(), &src, "../../etc/passwd").await.is_err());
         assert!(put(lib.path(), &src, &HELLO.to_uppercase()).await.is_err());
-        assert!(!lib.path().join("by-hash").exists());
+        let dirs = fs::read_dir(lib.path()).unwrap().filter(|e| e.as_ref().unwrap().path().is_dir()).count();
+        assert_eq!(dirs, 0, "nothing created in the store");
     }
 
     // Through store::store, the way a Store hop does it.
     #[tokio::test]
     async fn storing_a_file_envelope_writes_a_ref_to_its_blob() {
-        let lib = tempfile::tempdir().unwrap();
-        let src = file_with(lib.path(), "intake-book.txt", "hello");
+        let vault = tempfile::tempdir().unwrap();
+        crate::coffer::init(vault.path()).unwrap();
+        let src = file_with(vault.path(), "intake-book.txt", "hello");
         let envelope = Envelope::new(Source::Manual, "file/book", Payload::FilePath(src.clone()), Some("52-H"));
+        let nest_dir = vault.path().join("52_media/52-H_books");
 
-        let written = crate::store::store(&envelope, lib.path(), "52_media/52-H_books").await.unwrap();
+        let written = crate::store::store(&envelope, vault.path(), &nest_dir).await.unwrap();
 
+        assert!(written.content_path.starts_with(nest_dir.join("entries")));
         let reference = fs::read_to_string(&written.content_path).unwrap();
         assert_eq!(
             reference,
-            format!("ref: by-hash/2c/{HELLO}\noriginal: {}\n", src.display())
+            format!("ref: sha256:{HELLO}\noriginal: {}\n", src.display())
         );
         let meta: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&written.meta_path).unwrap()).unwrap();
         assert_eq!(meta["content_hash"], HELLO);
-        assert!(verify(lib.path(), HELLO).await.unwrap());
+        let contents = crate::coffer::resolve(vault.path()).unwrap().contents;
+        assert!(verify(&contents, HELLO).await.unwrap());
     }
 }
 
@@ -253,6 +270,7 @@ mod store_hop_tests {
     #[tokio::test]
     async fn the_store_hop_writes_into_the_nests_real_folder() {
         let vault = tempfile::tempdir().unwrap();
+        crate::coffer::init(vault.path()).unwrap();
         let nest_dir = vault.path().join("52_media/52-H_books");
         fs::create_dir_all(&nest_dir).unwrap();
         fs::write(nest_dir.join("nest"), "id = \"52-H\"\nname = \"books\"\nkind = \"leaf\"\n").unwrap();
@@ -269,6 +287,6 @@ mod store_hop_tests {
             .collect();
         assert_eq!(refs.len(), 1);
         assert!(!vault.path().join("52-H_books").exists(), "no stray folder at the vault root");
-        assert!(vault.path().join("by-hash/2c").exists());
+        assert!(vault.path().join("85_coffer/85-B_contents/2c").exists(), "bytes go to the coffer");
     }
 }

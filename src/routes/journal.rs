@@ -12,6 +12,9 @@
 
 use std::sync::Arc;
 
+/// Where daily summaries are saved: 34-D_generated-summary in Orchard.
+const SUMMARY_NEST: &str = "34-D";
+
 use axum::{
     extract::State,
     http::StatusCode,
@@ -83,9 +86,11 @@ pub async fn write(
         }
     };
 
-    let jd_path = manifest.effective_path();
+    let nest_dir = registry
+        .nest_dir(&state.vault_root, &manifest.id)
+        .unwrap_or_else(|| state.vault_root.join(manifest.effective_path()));
 
-    match store::store(&envelope, &state.library_root, &jd_path).await {
+    match store::store(&envelope, &state.vault_root, &nest_dir).await {
         Ok(result) => {
             tracing::info!(file = %result.content_path.display(), "journal entry written");
             (StatusCode::CREATED, Json(serde_json::json!({
@@ -357,13 +362,25 @@ pub async fn summary(
         ts            = Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
     );
 
-    // ── Save to 34.4_Generated-summary/daily/ ────────────────────────────
-    // Summaries live in 34.4, not alongside raw entries in 34.2.
-    // This keeps generated content separate from raw input.
-    let summary_dir = state.library_root
-        .join("34_My-story")
-        .join("34.4_Generated-summary")
-        .join("daily");
+    // ── Save to <generated-summary nest>/daily/ ───────────────────────────
+    // Summaries live in their own nest, not alongside the raw entries.
+    // The generated-summary nest, found like any other nest. If the vault
+    // doesn't have it, the summary is returned but not saved.
+    let summary_dir = state.registry
+        .read()
+        .await
+        .nest_dir(&state.vault_root, SUMMARY_NEST)
+        .map(|d| d.join("daily"));
+    let Some(summary_dir) = summary_dir else {
+        tracing::warn!(nest = SUMMARY_NEST, "no generated-summary nest in the registry — daily summary not saved");
+        return (StatusCode::OK, Json(SummaryResponse {
+            date: date,
+            entry_count,
+            summary: summary_text,
+            metrics,
+            saved_to: None,
+        })).into_response();
+    };
 
     let _ = fs::create_dir_all(&summary_dir).await;
 
@@ -402,17 +419,16 @@ async fn read_entries_for_date(
     jd_address: &str,
     date:       &str,
 ) -> anyhow::Result<(String, usize)> {
-    // Find the node path from the registry.
-    let node_path = state.registry
+    // Find the nest's real folder from the registry.
+    let Some(nest_dir) = state.registry
         .read()
         .await
-        .get(jd_address)
-        .map(|m| m.effective_path())
-        .unwrap_or_else(|| jd_address.to_string());
+        .nest_dir(&state.vault_root, jd_address)
+    else {
+        return Ok((String::new(), 0));
+    };
 
-    let entries_dir = state.library_root
-        .join(&node_path)
-        .join("entries");
+    let entries_dir = nest_dir.join("entries");
 
     if !entries_dir.exists() {
         return Ok((String::new(), 0));

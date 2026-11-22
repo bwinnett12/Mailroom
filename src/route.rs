@@ -509,15 +509,10 @@ async fn run_stop(
                 // 52_media/52-H_books would get a stray 52-H_books/ at the
                 // vault root.
                 let nest_dir = nest_file.parent().unwrap_or(vault_root);
-                let rel = nest_dir
-                    .strip_prefix(vault_root)
-                    .map_err(|_| anyhow::anyhow!("nest {} is outside the vault", nest_dir.display()))?
-                    .to_string_lossy()
-                    .replace('\\', "/");
 
-                // vault_root doubles as library_root here, so blobs for
-                // route-stored files land in <vault>/by-hash/.
-                crate::store::store(envelope, vault_root, &rel).await?;
+                // Entries go into the nest's folder; file bytes go into the
+                // vault's coffer (see coffer.rs).
+                crate::store::store(envelope, vault_root, nest_dir).await?;
             }
             Hop::Link | Hop::LinkReplace => {
                 let envelope = envelope.ok_or_else(|| {
@@ -690,6 +685,7 @@ mod tests {
             about: None,
             known_tags: Vec::new(),
             call_number: None,
+            schema_version: None,
         }
     }
 
@@ -703,6 +699,7 @@ mod tests {
     #[tokio::test]
     async fn a_full_route_reaches_completed_and_moves_the_nest() {
         let vault = tempfile::tempdir().unwrap();
+        crate::coffer::init(vault.path()).unwrap();
         let manifest = test_manifest("52-B-aaaa1111", "Old Name");
         let old_dir = seed_nest(vault.path(), "52-B-aaaa1111_Old-Name", &manifest);
 
@@ -734,6 +731,7 @@ mod tests {
     #[tokio::test]
     async fn a_failing_script_marks_the_route_failed_at_the_right_stop() {
         let vault = tempfile::tempdir().unwrap();
+        crate::coffer::init(vault.path()).unwrap();
         let manifest = test_manifest("52-B-bbbb2222", "Doomed Book");
         seed_nest(vault.path(), "52-B-bbbb2222_Doomed-Book", &manifest);
 
@@ -763,6 +761,7 @@ mod tests {
     #[tokio::test]
     async fn resuming_an_in_progress_route_skips_already_completed_stops() {
         let vault = tempfile::tempdir().unwrap();
+        crate::coffer::init(vault.path()).unwrap();
         // Deliberately no nest seeded for "already-done" — if run()
         // incorrectly tried to redo stop 0, it would fail immediately
         // with "no nest file found," since nothing was ever created
@@ -806,6 +805,7 @@ mod tests {
     #[tokio::test]
     async fn store_hop_actually_delivers_the_envelope() {
         let vault = tempfile::tempdir().unwrap();
+        crate::coffer::init(vault.path()).unwrap();
         let manifest = test_manifest("34.2", "Journal");
         seed_nest(vault.path(), "34.2_Journal", &manifest);
 
@@ -838,6 +838,7 @@ mod tests {
     #[tokio::test]
     async fn store_hop_without_an_envelope_fails_clearly() {
         let vault = tempfile::tempdir().unwrap();
+        crate::coffer::init(vault.path()).unwrap();
         let manifest = test_manifest("34.2", "Journal");
         seed_nest(vault.path(), "34.2_Journal", &manifest);
 
@@ -856,6 +857,7 @@ mod tests {
     #[tokio::test]
     async fn run_script_receives_the_envelope_and_its_receipt_is_logged() {
         let vault = tempfile::tempdir().unwrap();
+        crate::coffer::init(vault.path()).unwrap();
         let envelope = Envelope::new(
             Source::Manual,
             "text/todo",
@@ -904,6 +906,7 @@ mod tests {
     #[tokio::test]
     async fn emit_hop_turns_a_scripts_array_into_one_envelope_per_item() {
         let vault = tempfile::tempdir().unwrap();
+        crate::coffer::init(vault.path()).unwrap();
         let parent = Envelope::new(
             Source::Manual,
             "text/journal",
@@ -941,6 +944,7 @@ mod tests {
     #[tokio::test]
     async fn one_malformed_item_emits_nothing_and_fails_the_route() {
         let vault = tempfile::tempdir().unwrap();
+        crate::coffer::init(vault.path()).unwrap();
 
         // The second item has no data_type. Nothing from the batch should be
         // kept, not even the valid first item.
@@ -976,6 +980,7 @@ mod tests {
     #[tokio::test]
     async fn each_arrival_is_recorded_to_the_watcher_chained_by_cause() {
         let vault = tempfile::tempdir().unwrap();
+        crate::coffer::init(vault.path()).unwrap();
         seed_nest(vault.path(), "22_upkeep", &test_manifest("22", "upkeep"));
         seed_nest(vault.path(), "52_media", &test_manifest("52", "media"));
         seed_nest(vault.path(), "91_Logging", &test_manifest("91", "Logging"));
@@ -1004,6 +1009,7 @@ mod tests {
     #[tokio::test]
     async fn a_failing_stop_is_recorded_to_the_watchers_errors_channel() {
         let vault = tempfile::tempdir().unwrap();
+        crate::coffer::init(vault.path()).unwrap();
         seed_nest(vault.path(), "91_Logging", &test_manifest("91", "Logging"));
 
         let mut route = Route::new(
@@ -1071,6 +1077,7 @@ mod tests {
     #[tokio::test]
     async fn link_replace_drops_links_the_envelope_no_longer_declares() {
         let vault = tempfile::tempdir().unwrap();
+        crate::coffer::init(vault.path()).unwrap();
         let v = vault.path();
         send_links(v, "recipe/soup", &[("USES", "ing/salt"), ("USES", "ing/onion")], Hop::Link).await.unwrap();
 
@@ -1089,6 +1096,7 @@ mod tests {
     #[tokio::test]
     async fn plain_link_still_only_adds() {
         let vault = tempfile::tempdir().unwrap();
+        crate::coffer::init(vault.path()).unwrap();
         let v = vault.path();
         send_links(v, "recipe/stew", &[("USES", "ing/salt")], Hop::Link).await.unwrap();
         send_links(v, "recipe/stew", &[("USES", "ing/beef")], Hop::Link).await.unwrap();
@@ -1100,6 +1108,7 @@ mod tests {
     #[tokio::test]
     async fn resending_an_unchanged_envelope_with_replace_writes_no_link_events() {
         let vault = tempfile::tempdir().unwrap();
+        crate::coffer::init(vault.path()).unwrap();
         let v = vault.path();
         let links = [("USES", "ing/rice"), ("uses", "ing/rice"), ("SERVED_WITH", "recipe/beans")];
         send_links(v, "recipe/rice", &links, Hop::LinkReplace).await.unwrap();
@@ -1114,6 +1123,7 @@ mod tests {
     #[tokio::test]
     async fn replace_keeps_system_edges_and_edges_pointing_in() {
         let vault = tempfile::tempdir().unwrap();
+        crate::coffer::init(vault.path()).unwrap();
         let v = vault.path();
         send_links(v, "recipe/salsa", &[("USES", "ing/tomato")], Hop::Link).await.unwrap();
         send_links(v, "recipe/tacos", &[("USES", "recipe/salsa")], Hop::Link).await.unwrap();
@@ -1131,6 +1141,7 @@ mod tests {
     #[tokio::test]
     async fn replace_compares_envelope_targets_after_resolving_them() {
         let vault = tempfile::tempdir().unwrap();
+        crate::coffer::init(vault.path()).unwrap();
         let v = vault.path();
         // An envelope that claims a key; linking to its UUID is linking to the key.
         let mut book = Envelope::new(Source::Manual, "media/book", Payload::Text("DDIA".into()), None::<&str>);
@@ -1149,6 +1160,7 @@ mod tests {
     #[tokio::test]
     async fn a_bad_link_in_replace_mode_withdraws_nothing() {
         let vault = tempfile::tempdir().unwrap();
+        crate::coffer::init(vault.path()).unwrap();
         let v = vault.path();
         send_links(v, "recipe/pie", &[("USES", "ing/apple")], Hop::Link).await.unwrap();
         let err = send_links(v, "recipe/pie", &[("USES", "ing/pear"), ("bad!label", "x")], Hop::LinkReplace).await;

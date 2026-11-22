@@ -4,9 +4,11 @@
 // vault. It is Mailroom's write-ahead log and the source of truth that the
 // graph (and later, replication) is built from.
 //
-//   <vault>/.mailroom/ledger/events.jsonl   one Record per line
-//   <vault>/.mailroom/ledger/ledger.lock    held for as long as a process
+//   <coffer ledger>/<device>/events.jsonl   one Record per line
+//   <coffer ledger>/<device>/ledger.lock    held for as long as a process
 //                                           has the ledger open
+//
+// (<coffer ledger> is the 85-C_ledger nest by default; see coffer.rs.)
 //
 // Guarantees, and how each one is kept:
 //
@@ -33,7 +35,7 @@
 // released, so the graph is always exactly the ledger replayed: no reader
 // can see a record in one and not the other. Every MAILROOM_SNAPSHOT_EVERY
 // appends (default 1000, 0 = never) the graph is written to
-//   <vault>/.mailroom/graph/snapshot.bin
+//   <coffer ledger>/<device>/snapshot.bin
 // and on open the graph is loaded from that snapshot and only the records
 // after it are replayed. See graph/snapshot.rs.
 //
@@ -122,22 +124,22 @@ pub struct Startup {
 }
 
 impl Ledger {
-    /// Open (creating if needed) the ledger for a vault, repairing a torn
+    /// Open (creating if needed) the ledger kept in `dir`, repairing a torn
     /// final line. Fails if another process holds the ledger, or if a
-    /// complete line is corrupt.
-    pub fn open(vault_root: &Path) -> anyhow::Result<Ledger> {
+    /// complete line is corrupt. A vault's ledger is opened with
+    /// `for_vault`, which finds `dir` in the coffer.
+    pub fn open(dir: &Path) -> anyhow::Result<Ledger> {
         let every = std::env::var("MAILROOM_SNAPSHOT_EVERY")
             .ok()
             .and_then(|v| v.trim().parse().ok())
             .unwrap_or(DEFAULT_SNAPSHOT_EVERY);
-        Ledger::open_with(vault_root, every)
+        Ledger::open_with(dir, every)
     }
 
     /// `open`, with an explicit snapshot cadence (0 = never snapshot).
-    pub fn open_with(vault_root: &Path, snapshot_every: u64) -> anyhow::Result<Ledger> {
+    pub fn open_with(dir: &Path, snapshot_every: u64) -> anyhow::Result<Ledger> {
         let started = std::time::Instant::now();
-        let dir = vault_root.join(".mailroom").join("ledger");
-        std::fs::create_dir_all(&dir)?;
+        std::fs::create_dir_all(dir)?;
 
         let lock = OpenOptions::new()
             .create(true)
@@ -155,10 +157,7 @@ impl Ledger {
 
         let path = dir.join("events.jsonl");
         let existed = path.exists();
-        let snapshot_path = vault_root
-            .join(".mailroom")
-            .join("graph")
-            .join("snapshot.bin");
+        let snapshot_path = dir.join("snapshot.bin");
 
         // ── Where to start reading ──────────────────────────────────────────
         //
@@ -743,6 +742,10 @@ fn scan_from(
 
 /// The one ledger for this vault in this process. Every route in the
 /// process shares it, which is what makes appends single-writer.
+///
+/// The ledger lives in the vault's coffer, in this device's folder. A vault
+/// still in the old layout (ledger in .mailroom/) is refused: opening a
+/// fresh ledger beside the old one would fork its history.
 pub fn for_vault(vault_root: &Path) -> anyhow::Result<Arc<Ledger>> {
     static OPEN: OnceLock<Mutex<HashMap<PathBuf, Arc<Ledger>>>> = OnceLock::new();
     let key = std::fs::canonicalize(vault_root)?;
@@ -753,7 +756,17 @@ pub fn for_vault(vault_root: &Path) -> anyhow::Result<Arc<Ledger>> {
     if let Some(ledger) = open.get(&key) {
         return Ok(ledger.clone());
     }
-    let ledger = Arc::new(Ledger::open(&key)?);
+    let legacy = crate::coffer::legacy_layout(&key);
+    if !legacy.is_empty() {
+        anyhow::bail!(
+            "the vault at {} is still in the old layout ({}). Run `mailroom migrate --dry-run` \
+             to see what would move into the coffer, then `mailroom migrate`.",
+            key.display(),
+            legacy.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+        );
+    }
+    let coffer = crate::coffer::for_vault(&key)?;
+    let ledger = Arc::new(Ledger::open(&coffer.ledger_dir)?);
     open.insert(key, ledger.clone());
     Ok(ledger)
 }
@@ -783,7 +796,7 @@ mod tests {
     }
 
     fn ledger_file(vault: &Path) -> PathBuf {
-        vault.join(".mailroom/ledger/events.jsonl")
+        vault.join("events.jsonl")
     }
 
     // ── The live graph and its snapshot ──────────────────────────────────
@@ -844,7 +857,7 @@ mod tests {
             }
             l.snapshot_now().unwrap();
         }
-        let snap = |v: &tempfile::TempDir| v.path().join(".mailroom/graph/snapshot.bin");
+        let snap = |v: &tempfile::TempDir| v.path().join("snapshot.bin");
         std::fs::copy(snap(&a), snap(&b)).unwrap();
 
         let l = Ledger::open_with(b.path(), 0).unwrap();
@@ -868,7 +881,7 @@ mod tests {
             }
             l.snapshot_now().unwrap();
         }
-        let snap = vault.path().join(".mailroom/graph/snapshot.bin");
+        let snap = vault.path().join("snapshot.bin");
         let mut bytes = std::fs::read(&snap).unwrap();
         let n = bytes.len();
         bytes[n - 3] ^= 0xFF;
@@ -1057,7 +1070,7 @@ mod tests {
         l.append(link(1)).unwrap();
         l.snapshot_now().unwrap();
 
-        let snap_path = vault.path().join(".mailroom/graph/snapshot.bin");
+        let snap_path = vault.path().join("snapshot.bin");
         let good = snapshot::read(&snap_path).unwrap().unwrap();
         let wrong = Graph::from_records(&l.records().unwrap()[..1]);
         snapshot::write(&snap_path, &wrong, &good.checkpoint).unwrap();

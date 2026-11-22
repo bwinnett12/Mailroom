@@ -179,6 +179,7 @@ fn blank_manifest(id: &str, name: &str, kind: NodeKind) -> Manifest {
         about: None,
         known_tags: Vec::new(),
         call_number: None,
+        schema_version: None,
     }
 }
 

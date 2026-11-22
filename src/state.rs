@@ -179,8 +179,6 @@ pub struct AppState {
     /// Absolute path to the local vault clone.
     pub vault_root: PathBuf,
  
-    pub library_root: PathBuf,
- 
     /// Live registry built from nest files at startup.
     ///
     /// Was a bare Arc<Registry> — genuinely read-only, matching the
@@ -204,7 +202,6 @@ pub struct AppState {
 impl AppState {
     pub fn new(
         vault_root: impl Into<PathBuf>,
-        library_root: impl Into<PathBuf>,
         registry: Registry,
         inference: InferenceConfig,
         title_cleanup: Vec<String>,
@@ -212,12 +209,22 @@ impl AppState {
     ) -> Self {
         Self {
             vault_root: vault_root.into(),
-            library_root: library_root.into(),
             registry: std::sync::Arc::new(tokio::sync::RwLock::new(registry)),
             http_client: Client::new(),
             inference,
             title_cleanup,
             router: std::sync::Arc::new(router),
         }
+    }
+
+    /// A nest's real folder in the vault: where its `nest` file was found,
+    /// or <vault>/<effective_path> for a nest registered without one.
+    /// Entries are stored here; file bytes go to the coffer.
+    pub async fn nest_dir(&self, manifest: &crate::manifest::Manifest) -> PathBuf {
+        self.registry
+            .read()
+            .await
+            .nest_dir(&self.vault_root, &manifest.id)
+            .unwrap_or_else(|| self.vault_root.join(manifest.effective_path()))
     }
 }

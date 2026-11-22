@@ -184,27 +184,24 @@ pub struct WriteResult {
 
 // ── store() ───────────────────────────────────────────────────────────────────
 
-/// Write an envelope to disk under library_root/{jd_path}/entries/.
+/// Write an envelope into a nest: `<nest_dir>/entries/`.
 ///
-/// `library_root` is /storage/Library (or local equivalent during dev).
-/// `jd_path` is the relative path to the JD node directory,
-///   e.g. "34_My-story/34.2_Journal"
+/// `nest_dir` is the nest's real folder in the vault (the folder holding
+/// its `nest` file), e.g. <vault>/34_lore/34-B_journal. Look it up with
+/// Registry::nest_dir or move_branch::find_nest_by_id; never derive it from
+/// id + name, which is only right for nests at the top of the vault.
+///
+/// File payloads: the bytes go into the vault's coffer (see coffer.rs,
+/// blobs.rs) and the nest gets a small .ref pointer naming them by hash.
 ///
 /// Returns the paths of the two files written.
 pub async fn store(
     envelope: &Envelope,
-    library_root: &Path,
-    jd_path: &str,
-    // The relative path within the library to this node's directory.
-    // We get this from the registry manifest — not derived from the
-    // JD address alone, because the folder might have a custom name.
+    vault_root: &Path,
+    nest_dir: &Path,
 ) -> anyhow::Result<WriteResult> {
     // ── Build the entries directory path ──────────────────────────────────────
-    let entries_dir = library_root
-        .join(jd_path)
-        // .join() appends a path segment — like Path::new(a).push(b)
-        // but returns a new PathBuf rather than mutating.
-        .join("entries");
+    let entries_dir = nest_dir.join("entries");
 
     // ── Create the directory if it doesn't exist ──────────────────────────────
     fs::create_dir_all(&entries_dir).await?;
@@ -231,15 +228,16 @@ pub async fn store(
     // ── Write content file ────────────────────────────────────────────────────
     match &envelope.payload {
         Payload::FilePath(src_path) => {
-            // The file itself goes into the blob store under its hash; the
-            // nest gets a small .ref saying which blob. See blobs.rs.
+            // The file itself goes into the coffer under its hash; the nest
+            // gets a small .ref saying which bytes. The pointer names the
+            // hash, not a path, so it stays true wherever the coffer is.
             let hash = content_hash
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("a file payload always has a content hash"))?;
-            let blob = crate::blobs::put(library_root, src_path, hash).await?;
+            let coffer = crate::coffer::for_vault(vault_root)?;
+            crate::blobs::put(&coffer.contents, src_path, hash).await?;
             let reference = format!(
-                "ref: {}\noriginal: {}\n",
-                blob.display(),
+                "ref: sha256:{hash}\noriginal: {}\n",
                 src_path.display()
             );
             fs::write(&content_path, reference).await?;

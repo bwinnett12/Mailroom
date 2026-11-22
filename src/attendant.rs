@@ -79,14 +79,19 @@ pub async fn intake(
     // ── Mint a fresh child Nest ──────────────────────────────────────────
     let name = child_slug(envelope, &state.title_cleanup);
 
-    // effective_path()'s fallback ("{id}_{name}") assumes the node lives
-    // directly under library_root — true for top-level schema-generated
-    // nodes, but not for a book living under 52-B_books. Set `path`
-    // explicitly to the full relative path, same convention documented
-    // on the field itself ("34_My-story/34.2_Journal"-style), rather
-    // than relying on the derived fallback here.
+    // The child goes inside the gate's real folder (a book under
+    // 52_media/52-B_books, not a stray 52-B_books/ at the vault root).
+    // `path` records the full path relative to the vault, the convention
+    // documented on the field itself, so effective_path() is right too.
+    let gate_dir = state
+        .registry
+        .read()
+        .await
+        .dir_of(&gate.id)
+        .unwrap_or_else(|| std::path::PathBuf::from(gate.effective_path()));
     let folder_name = format!("{child_id}_{name}");
-    let full_path = format!("{}/{}", gate.effective_path(), folder_name);
+    let child_rel = gate_dir.join(&folder_name);
+    let full_path = child_rel.to_string_lossy().replace('\\', "/");
 
     let child_manifest = Manifest {
         id:   child_id.clone(),
@@ -108,35 +113,36 @@ pub async fn intake(
         about: None,
         known_tags: Vec::new(),
         call_number: envelope.meta.get("call_number").cloned(),
+        schema_version: None,
     };
 
     // create_orchard() already exists and already does exactly this —
     // previously only ever called at bootstrap from generate_fresh_tree().
     // A one-node slice reuses it unchanged for a single runtime mint.
-    // Parent is library_root itself, not the gate's own directory —
+    // Parent is the vault root, not the gate's own directory —
     // child_manifest.path is already the full relative path (including
-    // the gate's own folder name), so create_station's own
+    // the gate's own folder), so create_station's own
     // parent_path.join(effective_path()) resolves correctly without
     // double-joining the gate's prefix.
     let node = Nest {
         manifest: child_manifest.clone(),
         children: Vec::new(),
     };
-    create_station(&node, &state.library_root)?;
+    create_station(&node, &state.vault_root)?;
 
     tracing::info!(
         id       = %envelope.id,
         child_id = %child_id,
-        path     = %state.library_root.join(child_manifest.effective_path()).display(),
+        path     = %state.vault_root.join(&child_rel).display(),
         "minted new subnest"
     );
 
     // Register it so the *next* lookup (including the store() call right
     // below, which goes through the same registry-driven path lookup
     // logic other Nests use) can find it without a server restart.
-    state.registry.write().await.insert(child_id.clone(), child_manifest.clone());
+    state.registry.write().await.insert_at(child_id.clone(), child_manifest.clone(), child_rel.clone());
 
-    store::store(envelope, &state.library_root, &child_manifest.effective_path()).await?;
+    store::store(envelope, &state.vault_root, &state.vault_root.join(&child_rel)).await?;
 
     Ok(child_manifest)
 }

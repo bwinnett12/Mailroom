@@ -324,17 +324,26 @@ async fn check(State(state): State<Arc<AppState>>) -> Reply {
             )
         })?;
 
-    // Blobs: re-hash every one stored here. A blob the graph knows about
-    // but this vault doesn't hold (text payloads, or content on another
-    // device) is not a problem.
+    // Blobs: re-hash every one this machine's coffer holds. A blob the
+    // graph knows about but this coffer doesn't hold (text payloads, or
+    // content kept only on another device) is not a problem.
+    let contents = crate::coffer::for_vault(&state.vault_root)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?
+        .contents
+        .clone();
     let (mut verified, mut absent) = (0usize, 0usize);
     let mut mismatched = Vec::new();
     for hash in &report.blob_hashes {
-        if !state.vault_root.join(crate::blobs::rel_path(hash)).exists() {
+        if !contents.join(crate::blobs::rel_path(hash)).exists() {
             absent += 1;
             continue;
         }
-        match crate::blobs::verify(&state.vault_root, hash).await {
+        match crate::blobs::verify(&contents, hash).await {
             Ok(true) => verified += 1,
             Ok(false) => mismatched.push(hash.clone()),
             Err(e) => report.problems.push(format!("blob {hash}: {e}")),

@@ -19,6 +19,7 @@ fn ledger_records(vault: &Path) -> Vec<crate::ledger::Record> {
 #[tokio::test]
 async fn the_ledger_records_received_arrival_then_completion_carrying_the_content_hash() {
     let vault = tempfile::tempdir().unwrap();
+    crate::coffer::init(vault.path()).unwrap();
     let envelope = Envelope::new(
         Source::Manual,
         "text/note",
@@ -63,6 +64,7 @@ async fn the_ledger_records_received_arrival_then_completion_carrying_the_conten
 #[tokio::test]
 async fn a_failing_stop_leaves_arrival_then_error_in_the_ledger_and_no_completion() {
     let vault = tempfile::tempdir().unwrap();
+    crate::coffer::init(vault.path()).unwrap();
     let mut route = Route::new(
         "test-dodo",
         vec![
@@ -102,6 +104,7 @@ async fn a_failing_stop_leaves_arrival_then_error_in_the_ledger_and_no_completio
 #[tokio::test]
 async fn an_emitted_childs_events_name_the_parent_envelope() {
     let vault = tempfile::tempdir().unwrap();
+    crate::coffer::init(vault.path()).unwrap();
     let parent = Envelope::new(
         Source::Manual,
         "text/journal",
@@ -157,6 +160,7 @@ async fn an_emitted_childs_events_name_the_parent_envelope() {
 #[tokio::test]
 async fn concurrent_routes_on_one_vault_share_one_gapless_ledger() {
     let vault = tempfile::tempdir().unwrap();
+    crate::coffer::init(vault.path()).unwrap();
     let make = |nest: &str| {
         Route::new(
             "test-dodo",

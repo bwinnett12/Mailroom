@@ -59,7 +59,8 @@ pub struct EntriesResponse {
 
 /// GET /envelopes
 ///
-/// Walks the Library directory, reads all .meta.json sidecars,
+/// Walks the vault, reads all .meta.json sidecars (the coffer is skipped:
+/// it holds bytes and ledgers, never entries),
 /// filters by JD address if requested, sorts, and returns.
 pub async fn list(
     State(state): State<Arc<AppState>>,
@@ -69,10 +70,10 @@ pub async fn list(
     // If a required field is missing it returns 400 — but since
     // all our fields are Option, missing params just become None.
 ) -> impl IntoResponse {
-    let library_root = &state.library_root;
+    let vault_root = &state.vault_root;
 
-    if !library_root.exists() {
-        // Library doesn't exist yet — return empty list, not an error.
+    if !vault_root.exists() {
+        // Vault doesn't exist yet — return empty list, not an error.
         // This is normal during initial setup.
         return (StatusCode::OK, Json(EntriesResponse {
             total:   0,
@@ -83,9 +84,16 @@ pub async fn list(
     // ── Collect all .meta.json files ──────────────────────────────────────────
     let mut entries: Vec<EntryMeta> = Vec::new();
 
-    for dir_entry in WalkDir::new(&library_root)
+    // Blob folders can hold many thousands of files; don't descend.
+    let coffer = crate::coffer::for_vault(vault_root).ok();
+    let skip = |p: &std::path::Path| {
+        coffer.as_ref().is_some_and(|c| p == c.contents || p == c.ledger_nest)
+    };
+
+    for dir_entry in WalkDir::new(vault_root)
         .follow_links(true)
         .into_iter()
+        .filter_entry(|e| !skip(e.path()))
         .filter_map(|e| e.ok())
     {
         let path = dir_entry.path();

@@ -1155,6 +1155,7 @@ mod tests {
     #[tokio::test]
     async fn the_calc_3_query_finds_the_class_notes_for_a_paper() {
         let vault = tempfile::tempdir().unwrap();
+        crate::coffer::init(vault.path()).unwrap();
         let v = vault.path();
         send(v, "course", Some("course/calc-3"), "Calc 3", &[]).await;
         send(
@@ -1294,6 +1295,7 @@ mod tests {
     #[tokio::test]
     async fn a_bad_link_label_records_none_of_the_envelopes_links() {
         let vault = tempfile::tempdir().unwrap();
+        crate::coffer::init(vault.path()).unwrap();
         let mut e = Envelope::new(
             Source::Manual,
             "note",

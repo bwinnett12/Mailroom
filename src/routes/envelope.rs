@@ -193,8 +193,8 @@ pub async fn receive(
                                         // We update jd_address so the meta sidecar
                                         // records the classified address, not None.
 
-                                        let jd_path = manifest.effective_path();
-                                        match store::store(&classified, &state.library_root, &jd_path).await {
+                                        let nest_dir = state.nest_dir(&manifest).await;
+                                        match store::store(&classified, &state.vault_root, &nest_dir).await {
                                             Ok(result) => {
                                                 tracing::info!(
                                                     content = %result.content_path.display(),
@@ -336,11 +336,11 @@ pub async fn receive(
 								}
 							}
 						} else {
-							let jd_path = manifest.effective_path();
+							let nest_dir = state.nest_dir(&manifest).await;
 							// e.g. "34.2_Journal" or "34_My-story/34.2_Journal"
 							// The manifest tells us where this node lives on disk.
 
-							match store::store(&envelope, &state.library_root, &jd_path).await {
+							match store::store(&envelope, &state.vault_root, &nest_dir).await {
 								Ok(result) => {
 									tracing::info!(
 										content = %result.content_path.display(),
@@ -531,8 +531,8 @@ pub async fn upload(
             }
         }
     } else {
-        let jd_path = manifest.effective_path();
-        match store::store(&envelope, &state.library_root, &jd_path).await {
+        let nest_dir = state.nest_dir(&manifest).await;
+        match store::store(&envelope, &state.vault_root, &nest_dir).await {
             Ok(result) => {
                 tracing::info!(content = %result.content_path.display(), meta = %result.meta_path.display(), "uploaded file written to disk");
             }

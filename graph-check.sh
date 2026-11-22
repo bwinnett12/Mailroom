@@ -31,6 +31,9 @@ cargo build -q 2>/dev/null || { echo "cargo build failed — run 'cargo build' t
 
 # ── Vault: one nest, one route per kind, all ending in the link hop ─────────
 mkdir -p "$V/40_learning/40-A_calc"
+export MAILROOM_DEVICE=check   # fixed device name, so the ledger folder is known
+MAILROOM_VAULT=$V "$REPO/target/debug/mailroom" coffer init >/dev/null || { echo "coffer init failed"; exit 1; }
+LEDGER=$V/85_coffer/85-C_ledger/check; CONTENTS=$V/85_coffer/85-B_contents
 cat > "$V/40_learning/40-A_calc/nest" <<'EOF'
 id = "40"
 name = "calc"

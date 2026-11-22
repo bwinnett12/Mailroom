@@ -38,6 +38,12 @@ pub struct Registry {
     /// e.g. "35.2" → Manifest { id: "35.2", name: "Physical", ... }
     entries: HashMap<String, Manifest>,
 
+    /// Where each nest really is: its folder, relative to the vault root
+    /// (e.g. "34_lore/34-B_journal"). Recorded during the walk. A nest
+    /// registered without a folder falls back to its manifest's
+    /// effective_path().
+    dirs: HashMap<String, std::path::PathBuf>,
+
     /// How many nest files were found during the last load.
     /// Useful for logging and health checks.
     pub node_count: usize,
@@ -60,6 +66,7 @@ impl Registry {
         // automatically.
 
         let mut entries = HashMap::new();
+        let mut dirs: HashMap<String, std::path::PathBuf> = HashMap::new();
         // `mut` = mutable. In Rust, variables are immutable by default.
         // You must explicitly opt in to mutation with `mut`.
         // entries starts empty; we fill it in the loop below.
@@ -132,6 +139,9 @@ impl Registry {
                             "loaded manifest"
                         );
 
+                        if let Some(dir) = path.parent().and_then(|d| d.strip_prefix(vault_root).ok()) {
+                            dirs.insert(id.clone(), dir.to_path_buf());
+                        }
                         entries.insert(id, manifest);
                         // Insert into the HashMap. If a manifest with this
                         // id already exists, it gets replaced — last one wins.
@@ -161,7 +171,7 @@ impl Registry {
             "registry loaded"
         );
 
-        Ok(Registry { entries, node_count })
+        Ok(Registry { entries, dirs, node_count })
         // Ok(...) wraps our Registry in the success variant of Result.
         // `entries` and `node_count` — Rust shorthand: when the field name
         // and variable name are the same, you can write just the name once.
@@ -173,6 +183,7 @@ impl Registry {
 	pub fn empty() -> Registry { 
 		Registry {
 			entries:    HashMap::new(),
+			dirs:       HashMap::new(),
 			node_count: 0,
 		}
 	}
@@ -191,6 +202,27 @@ impl Registry {
 		tracing::debug!(id = %id, "registered subnest at runtime");
 		self.entries.insert(id, manifest);
 		self.node_count = self.entries.len();
+	}
+
+	/// `insert`, also recording the nest's folder (relative to the vault).
+	pub fn insert_at(&mut self, id: String, manifest: Manifest, dir: impl Into<std::path::PathBuf>) {
+		self.dirs.insert(id.clone(), dir.into());
+		self.insert(id, manifest);
+	}
+
+	/// The nest's folder relative to the vault root: where its `nest` file
+	/// was found, or its manifest's effective_path() if it was registered
+	/// without one. None if the id isn't registered.
+	pub fn dir_of(&self, id: &str) -> Option<std::path::PathBuf> {
+		self.dirs
+			.get(id)
+			.cloned()
+			.or_else(|| self.entries.get(id).map(|m| std::path::PathBuf::from(m.effective_path())))
+	}
+
+	/// The nest's folder as an absolute path under `vault_root`.
+	pub fn nest_dir(&self, vault_root: &Path, id: &str) -> Option<std::path::PathBuf> {
+		self.dir_of(id).map(|d| vault_root.join(d))
 	}
 
     /// Look up which JD address handles a given data type, by scanning

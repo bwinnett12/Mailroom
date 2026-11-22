@@ -3,6 +3,7 @@
 mod attendant;
 mod blobs;
 mod clean_file;
+mod coffer;
 mod cleanup;
 mod cli;
 mod dodo;
@@ -13,6 +14,7 @@ mod inference;
 mod ledger;
 mod machines;
 mod manifest;
+mod migrate;
 mod move_branch;
 mod nest;
 mod orchard;
@@ -43,6 +45,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if cli_args.get(1).map(String::as_str) == Some("move-branch") {
         return cli::move_branch(&cli_args[2..]);
+    }
+    if cli_args.get(1).map(String::as_str) == Some("migrate") {
+        return migrate::run(&cli_args[2..]);
+    }
+    if cli_args.get(1).map(String::as_str) == Some("coffer") {
+        if cli_args.get(2).map(String::as_str) != Some("init") {
+            return Err("usage: mailroom coffer init   (creates the coffer nests in $MAILROOM_VAULT)".into());
+        }
+        let vault = std::env::var("MAILROOM_VAULT").map_err(|_| "set MAILROOM_VAULT")?;
+        let written = coffer::init(Path::new(&vault))?;
+        if written.is_empty() {
+            println!("the coffer nests already exist");
+        }
+        for f in written {
+            println!("created {}", f.display());
+        }
+        return Ok(());
     }
 
     let vault_root =
@@ -95,10 +114,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         InferenceConfig::from_env_defaults()
     };
 
-    let library_root = std::env::var("MAILROOM_LIBRARY_ROOT").unwrap_or_else(|_| {
-        // Default: a Library/ directory next to the vault
-        format!("{}/Library", vault_root)
-    });
+    // There is no separate Library any more: entries live in their nests
+    // and file bytes in the coffer (see coffer.rs).
+    if std::env::var("MAILROOM_LIBRARY_ROOT").is_ok() {
+        tracing::warn!("MAILROOM_LIBRARY_ROOT is set but no longer used; `mailroom migrate` moves an old library into the vault");
+    }
 
     let vault_path = PathBuf::from(&vault_root);
 
@@ -136,9 +156,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(routes = routing.route_count(), "routing table ready");
 
     // ── Ledger ────────────────────────────────────────────────────────────────
-    // Opened before serving: this takes the vault's lock (a second Mailroom
-    // on the same vault stops here), repairs a torn final line, and records
-    // any stop a crash cut off. Nothing is in flight yet, so the scan is exact.
+    // Opened before serving: this finds the coffer (a vault without one, or
+    // still in the old layout, stops here with what to do), takes the
+    // ledger's lock (a second Mailroom on the same vault stops here),
+    // repairs a torn final line, and records any stop a crash cut off.
+    // Nothing is in flight yet, so the scan is exact.
     if vault_path.exists() {
         let ledger = ledger::for_vault(&vault_path)?;
         let health = ledger.recover()?;
@@ -154,7 +176,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = std::sync::Arc::new(AppState::new(
         vault_path,
-        library_root,
         registry,
         inference,
         title_cleanup,
