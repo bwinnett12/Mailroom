@@ -348,6 +348,110 @@ impl Ledger {
         write_snapshot(&self.snapshot_path, &mut inner)
     }
 
+    /// Full integrity check, the one startup skips. Holds the ledger lock
+    /// throughout, so nothing is appended mid-check:
+    ///   1. re-read and re-parse the whole ledger (seq gaps, corruption)
+    ///   2. dangling caused_by / envelope_parent
+    ///   3. the open-stop set the server keeps vs one rebuilt from scratch
+    ///   4. the live graph vs a fresh replay of every record
+    ///   5. the snapshot on disk vs a fresh replay up to its checkpoint
+    /// Blob files are left to the caller (blobs::verify is async).
+    pub fn verify(&self) -> CheckReport {
+        let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let mut report = CheckReport {
+            open_stops: inner.open.len(),
+            ..CheckReport::default()
+        };
+
+        let records = match scan_from(&self.path, 0, None) {
+            Ok((records, _, 0)) => records,
+            Ok((records, _, torn)) => {
+                report
+                    .problems
+                    .push(format!("ledger ends in {torn} bytes of partial line"));
+                records
+            }
+            Err(e) => {
+                report
+                    .problems
+                    .push(format!("ledger does not read cleanly: {e}"));
+                report.snapshot = "not checked".into();
+                return report;
+            }
+        };
+        report.records = records.len();
+        if records.len() as u64 != inner.next_seq - 1 {
+            report.problems.push(format!(
+                "ledger holds {} records but the server has appended up to seq {}",
+                records.len(),
+                inner.next_seq - 1
+            ));
+        }
+
+        let health = check(&records);
+        report.dangling_causes = health.dangling_causes.len();
+        report.dangling_parents = health.dangling_parents.len();
+        for (seq, id) in health.dangling_causes.iter().take(5) {
+            report.problems.push(format!(
+                "record {seq}: caused_by {id} is not an earlier event"
+            ));
+        }
+        let rebuilt: HashSet<Uuid> = health
+            .interrupted
+            .iter()
+            .map(|r| r.event.event_id)
+            .collect();
+        let kept: HashSet<Uuid> = inner.open.keys().copied().collect();
+        if rebuilt != kept {
+            report.problems.push(format!(
+                "open stops: server keeps {}, a fresh read finds {}",
+                kept.len(),
+                rebuilt.len()
+            ));
+        }
+
+        let replay = Graph::from_records(&records);
+        for d in inner.graph.diff(&replay, 10) {
+            report.problems.push(format!("live graph vs replay: {d}"));
+        }
+
+        report.snapshot = match snapshot::read(&self.snapshot_path) {
+            Ok(None) => "none".into(),
+            Err(e) => {
+                report.problems.push(format!("snapshot unreadable: {e}"));
+                format!("unreadable: {e}")
+            }
+            Ok(Some(l)) => match verify_checkpoint(&self.path, &l.checkpoint) {
+                Err(why) => {
+                    report
+                        .problems
+                        .push(format!("snapshot does not belong to this ledger: {why}"));
+                    why
+                }
+                Ok(()) => {
+                    let upto = Graph::from_records(&records[..l.checkpoint.last_seq as usize]);
+                    let d = l.graph.diff(&upto, 10);
+                    if d.is_empty() {
+                        format!("matches a replay of records 1..={}", l.checkpoint.last_seq)
+                    } else {
+                        for x in &d {
+                            report.problems.push(format!("snapshot vs replay: {x}"));
+                        }
+                        "differs from a replay".into()
+                    }
+                }
+            },
+        };
+
+        report.blob_hashes = inner
+            .graph
+            .nodes_with_label("blob")
+            .iter()
+            .filter_map(|n| n.id.strip_prefix("blob:").map(str::to_string))
+            .collect();
+        report
+    }
+
     /// How the graph was built at open.
     #[allow(dead_code)]
     pub fn startup(&self) -> &Startup {
@@ -447,7 +551,7 @@ fn track(open: &mut HashMap<Uuid, Record>, r: &Record) {
                 open.remove(&cause);
             }
         }
-        EventKind::Received | EventKind::Linked => {}
+        EventKind::Received | EventKind::Linked | EventKind::Unlinked | EventKind::Retracted => {}
     }
 }
 
@@ -492,6 +596,23 @@ fn verify_checkpoint(path: &Path, cp: &snapshot::Checkpoint) -> Result<(), Strin
         ));
     }
     Ok(())
+}
+
+/// What `Ledger::verify` found. `problems` empty means everything agreed.
+#[derive(Debug, Default, Serialize)]
+pub struct CheckReport {
+    pub records: usize,
+    pub problems: Vec<String>,
+    /// Stops open right now. While the server runs these are stops in
+    /// flight, not damage.
+    pub open_stops: usize,
+    pub dangling_causes: usize,
+    pub dangling_parents: usize,
+    /// "none", "matches", or why it doesn't.
+    pub snapshot: String,
+    /// Blob hashes the graph knows about, for the caller to verify on disk.
+    #[serde(skip)]
+    pub blob_hashes: Vec<String>,
 }
 
 /// What a pass over the ledger found.
@@ -841,6 +962,115 @@ mod tests {
         assert_eq!(l.startup().from_snapshot, Some(1));
         assert_eq!(l.append(link(2)).unwrap().seq, 3);
         same_as_replay(&l);
+    }
+
+    // ── Corrections and the integrity check ──────────────────────────────
+
+    fn unlink(i: u64) -> Event {
+        let mut e = link(i);
+        e.kind = EventKind::Unlinked;
+        e
+    }
+
+    fn retract(node: &str) -> Event {
+        let mut e = ev(EventKind::Retracted, None, None);
+        e.node = Some(node.into());
+        e
+    }
+
+    // n0→n1→…→n5, unlink n1→n2, retract n4: left n0→n1, n2→n3.
+    // Snapshot, reopen from it, and the corrections are still applied.
+    #[test]
+    fn corrections_survive_a_snapshot_and_reopen() {
+        let vault = tempfile::tempdir().unwrap();
+        {
+            let l = Ledger::open_with(vault.path(), 0).unwrap();
+            for i in 0..5 {
+                l.append(link(i)).unwrap();
+            }
+            l.append(unlink(1)).unwrap();
+            l.append(retract("n4")).unwrap();
+            same_as_replay(&l);
+            l.snapshot_now().unwrap();
+        }
+        let l = Ledger::open_with(vault.path(), 0).unwrap();
+        assert_eq!(l.startup().from_snapshot, Some(7));
+        let edges: Vec<(String, String)> = l.with_graph(|g| {
+            let mut v: Vec<_> = g
+                .edges()
+                .iter()
+                .map(|e| (e.from.clone(), e.to.clone()))
+                .collect();
+            v.sort();
+            v
+        });
+        assert_eq!(
+            edges,
+            vec![("n0".into(), "n1".into()), ("n2".into(), "n3".into())]
+        );
+        assert!(l.with_graph(|g| g.node("n4").is_none()));
+    }
+
+    #[test]
+    fn verify_passes_on_a_healthy_ledger_with_a_snapshot() {
+        let vault = tempfile::tempdir().unwrap();
+        let l = Ledger::open_with(vault.path(), 3).unwrap();
+        for i in 0..7 {
+            l.append(link(i)).unwrap();
+        }
+        l.append(unlink(2)).unwrap();
+        let r = l.verify();
+        assert!(r.problems.is_empty(), "{:?}", r.problems);
+        assert_eq!(r.records, 8);
+        assert_eq!(r.snapshot, "matches a replay of records 1..=6");
+    }
+
+    #[test]
+    fn verify_reports_a_ledger_damaged_after_startup() {
+        let vault = tempfile::tempdir().unwrap();
+        let l = Ledger::open_with(vault.path(), 0).unwrap();
+        l.append(link(0)).unwrap();
+        l.append(link(1)).unwrap();
+        // Damage the file behind the server's back: rewrite record 1.
+        let file = ledger_file(vault.path());
+        let text = std::fs::read_to_string(&file).unwrap();
+        let broken = text.replacen("\"seq\":1", "\"seq\":9", 1);
+        std::fs::write(&file, broken).unwrap();
+
+        let r = l.verify();
+        assert!(
+            r.problems
+                .iter()
+                .any(|p| p.contains("does not read cleanly")),
+            "{:?}",
+            r.problems
+        );
+    }
+
+    // A snapshot whose checkpoint is genuine but whose graph is wrong (a bug
+    // in the writer, say) passes startup's one-line check. verify catches it.
+    #[test]
+    fn verify_reports_a_snapshot_that_disagrees_with_the_ledger() {
+        let vault = tempfile::tempdir().unwrap();
+        let l = Ledger::open_with(vault.path(), 0).unwrap();
+        l.append(link(0)).unwrap();
+        l.append(link(1)).unwrap();
+        l.snapshot_now().unwrap();
+
+        let snap_path = vault.path().join(".mailroom/graph/snapshot.bin");
+        let good = snapshot::read(&snap_path).unwrap().unwrap();
+        let wrong = Graph::from_records(&l.records().unwrap()[..1]);
+        snapshot::write(&snap_path, &wrong, &good.checkpoint).unwrap();
+
+        let r = l.verify();
+        assert!(
+            r.problems
+                .iter()
+                .any(|p| p.starts_with("snapshot vs replay")),
+            "{:?}",
+            r.problems
+        );
+        assert_eq!(r.snapshot, "differs from a replay");
     }
 
     #[test]

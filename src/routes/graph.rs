@@ -16,6 +16,14 @@
 //   GET /graph/degrees                               M1 degree table
 //   GET /graph/centrality?top=10&labels=ABOUT,CITES  M2 eigenvector centrality,
 //                                                    per connected component
+//   GET  /graph/nodes?label=recipe                   every node with a label (index)
+//   GET  /graph/check                                full integrity check
+//   POST /graph/unlink  {"from","label","to","reason"?}   withdraw one edge
+//   POST /graph/retract {"id","reason"?}                  withdraw a node + its edges
+//
+// Corrections (unlink, retract) are ledger events like everything else:
+// the history keeps the mistake and its correction. Content still arrives
+// through /dispatch and routes; these two only take things back.
 //   GET /graph/edges.csv                             edge list for NetworkX
 //
 // Wire it in by adding `.merge(graph::routes())` to the router in
@@ -28,7 +36,7 @@ use axum::{
     extract::{Query, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use serde::Deserialize;
@@ -46,6 +54,10 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/graph/path", get(path))
         .route("/graph/degrees", get(degrees))
         .route("/graph/centrality", get(centrality))
+        .route("/graph/nodes", get(nodes))
+        .route("/graph/check", get(check))
+        .route("/graph/unlink", post(unlink))
+        .route("/graph/retract", post(retract))
         .route("/graph/edges.csv", get(edges_csv))
 }
 
@@ -280,4 +292,177 @@ async fn centrality(State(state): State<Arc<AppState>>, Query(q): Query<Centrali
         }))
         .into_response())
     })
+}
+
+#[derive(Deserialize)]
+struct NodesQuery {
+    label: String,
+}
+
+async fn nodes(State(state): State<Arc<AppState>>, Query(q): Query<NodesQuery>) -> Reply {
+    with_graph(&state, |g| {
+        let found = g.nodes_with_label(&q.label);
+        Ok(Json(json!({ "label": q.label, "count": found.len(), "nodes": found })).into_response())
+    })
+}
+
+async fn check(State(state): State<Arc<AppState>>) -> Reply {
+    let ledger = crate::ledger::for_vault(&state.vault_root).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    // The ledger part runs on a blocking thread: it re-reads the whole file.
+    let l = ledger.clone();
+    let mut report = tokio::task::spawn_blocking(move || l.verify())
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
+
+    // Blobs: re-hash every one stored here. A blob the graph knows about
+    // but this vault doesn't hold (text payloads, or content on another
+    // device) is not a problem.
+    let (mut verified, mut absent) = (0usize, 0usize);
+    let mut mismatched = Vec::new();
+    for hash in &report.blob_hashes {
+        if !state.vault_root.join(crate::blobs::rel_path(hash)).exists() {
+            absent += 1;
+            continue;
+        }
+        match crate::blobs::verify(&state.vault_root, hash).await {
+            Ok(true) => verified += 1,
+            Ok(false) => mismatched.push(hash.clone()),
+            Err(e) => report.problems.push(format!("blob {hash}: {e}")),
+        }
+    }
+    for h in &mismatched {
+        report
+            .problems
+            .push(format!("blob {h}: bytes no longer match their hash"));
+    }
+
+    let status = if report.problems.is_empty() {
+        StatusCode::OK
+    } else {
+        StatusCode::CONFLICT
+    };
+    Ok((
+        status,
+        Json(json!({
+            "ok": report.problems.is_empty(),
+            "records": report.records,
+            "problems": report.problems,
+            "open_stops": report.open_stops,
+            "dangling_causes": report.dangling_causes,
+            "dangling_parents": report.dangling_parents,
+            "snapshot": report.snapshot,
+            "blobs": { "verified": verified, "mismatched": mismatched.len(), "not_stored_here": absent },
+        })),
+    )
+        .into_response())
+}
+
+const SYSTEM_NODE_PREFIXES: [&str; 2] = ["nest:", "blob:"];
+
+#[derive(Deserialize)]
+struct UnlinkBody {
+    from: String,
+    label: String,
+    to: String,
+    reason: Option<String>,
+}
+
+async fn unlink(State(state): State<Arc<AppState>>, Json(b): Json<UnlinkBody>) -> Reply {
+    let label = b.label.trim().to_uppercase().replace([' ', '-'], "_");
+    if crate::graph::centrality::SYSTEM_LABELS.contains(&label.as_str()) {
+        return Err(bad(format!(
+            "{label} edges record what happened and can't be unlinked; retract the node instead"
+        )));
+    }
+    let ledger = crate::ledger::for_vault(&state.vault_root).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    if !ledger.with_graph(|g| g.has_edge(&b.from, &label, &b.to)) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("no edge {} -{label}-> {}", b.from, b.to) })),
+        ));
+    }
+    let mut event = crate::event::Event::new(
+        "graph",
+        "graph",
+        None,
+        None,
+        crate::event::EventKind::Unlinked,
+        b.reason,
+    );
+    event.link = Some(crate::event::LinkFacts {
+        from: b.from.clone(),
+        label: label.clone(),
+        to: b.to.clone(),
+    });
+    let record = ledger.append(event).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    Ok(Json(
+        json!({ "unlinked": { "from": b.from, "label": label, "to": b.to }, "seq": record.seq }),
+    )
+    .into_response())
+}
+
+#[derive(Deserialize)]
+struct RetractBody {
+    id: String,
+    reason: Option<String>,
+}
+
+async fn retract(State(state): State<Arc<AppState>>, Json(b): Json<RetractBody>) -> Reply {
+    if SYSTEM_NODE_PREFIXES.iter().any(|p| b.id.starts_with(p)) {
+        return Err(bad(format!(
+            "{} is a system node (nest or blob) and can't be retracted",
+            b.id
+        )));
+    }
+    let ledger = crate::ledger::for_vault(&state.vault_root).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    let Some(edges) = ledger.with_graph(|g| {
+        g.node(&b.id)
+            .map(|_| g.edges_of(&b.id, Direction::Both, None).len())
+    }) else {
+        return Err(not_found(&b.id));
+    };
+    let mut event = crate::event::Event::new(
+        "graph",
+        "graph",
+        None,
+        None,
+        crate::event::EventKind::Retracted,
+        b.reason,
+    );
+    event.node = Some(b.id.clone());
+    let record = ledger.append(event).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    Ok(
+        Json(json!({ "retracted": b.id, "edges_removed": edges, "seq": record.seq }))
+            .into_response(),
+    )
 }

@@ -19,8 +19,16 @@
 //                    + EMITTED_FROM → parent envelope    if it came from fan-out
 //   Transition     VISITED → nest:<id>   (the envelope arrived at that stop)
 //   Linked         the edge the Link hop recorded, label as given
+//   Unlinked       that edge removed (a correction)
+//   Retracted      that node removed, with every edge touching it
 //   everything     no change
 //   else
+//
+// Removal. Edges live in a dense Vec; removing one swaps the last edge
+// into its slot (swap_remove) and fixes that edge's entries in the
+// adjacency lists. So edge order changes on removal, but deterministically:
+// replaying the same records always gives the same order, which is all the
+// snapshot and the live-vs-replay check need.
 //
 // Labels on edges written by Mailroom itself (VISITED, HAS_CONTENT,
 // EMITTED_FROM) describe where things went. Labels you write with links
@@ -108,6 +116,9 @@ pub struct Graph {
     seen: HashSet<(NodeId, String, NodeId)>,
     /// envelope uuid → its node, for envelopes with a key
     envelope_node: HashMap<Uuid, NodeId>,
+    /// label → nodes carrying it. The index behind with_label and
+    /// nodes_with_label, so "every recipe" doesn't scan every node.
+    by_label: BTreeMap<String, BTreeSet<NodeId>>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -140,8 +151,8 @@ impl Graph {
                 if let Some(id) = e.envelope_id {
                     self.envelope_node.insert(id, node.clone());
                 }
+                self.add_label(&node, &kind_of(&facts.data_type));
                 let n = self.ensure(&node);
-                n.labels.insert(kind_of(&facts.data_type));
                 n.props
                     .insert("data_type".into(), Value::from(facts.data_type.clone()));
                 n.props.insert(
@@ -159,7 +170,7 @@ impl Graph {
                 }
                 if let Some(hash) = &e.content_hash {
                     let blob = format!("blob:{hash}");
-                    self.ensure(&blob).labels.insert("blob".into());
+                    self.add_label(&blob, "blob");
                     self.add_edge(&node, "HAS_CONTENT", &blob, r.seq);
                 }
                 if let Some(parent) = e.envelope_parent {
@@ -171,13 +182,22 @@ impl Graph {
                 let Some(id) = e.envelope_id else { return };
                 let node = self.envelope(id);
                 let nest = format!("nest:{}", e.to);
-                self.ensure(&nest).labels.insert("nest".into());
+                self.add_label(&nest, "nest");
                 self.add_edge(&node, "VISITED", &nest, r.seq);
             }
             EventKind::Linked => {
                 let Some(link) = &e.link else { return };
                 let to = self.resolve(&link.to);
                 self.add_edge(&link.from, &link.label, &to, r.seq);
+            }
+            EventKind::Unlinked => {
+                let Some(link) = &e.link else { return };
+                let to = self.resolve_existing(&link.to);
+                self.remove_edge(&link.from, &link.label, &to);
+            }
+            EventKind::Retracted => {
+                let Some(node) = &e.node else { return };
+                self.remove_node(node);
             }
             EventKind::Completed | EventKind::Error | EventKind::Interrupted => {}
         }
@@ -195,6 +215,30 @@ impl Graph {
 
     pub fn edges(&self) -> &[Edge] {
         &self.edges
+    }
+
+    /// Is there an edge (from, label, to)?
+    pub fn has_edge(&self, from: &str, label: &str, to: &str) -> bool {
+        self.seen
+            .contains(&(from.to_string(), label.to_string(), to.to_string()))
+    }
+
+    /// Every node carrying `label`, from the index. Sorted by id.
+    pub fn nodes_with_label(&self, label: &str) -> Vec<&Node> {
+        self.by_label
+            .get(label)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.nodes.get(id))
+            .collect()
+    }
+
+    /// Node labels and how many nodes carry each.
+    pub fn label_counts(&self) -> BTreeMap<&str, usize> {
+        self.by_label
+            .iter()
+            .map(|(l, ids)| (l.as_str(), ids.len()))
+            .collect()
     }
 
     pub fn node_count(&self) -> usize {
@@ -246,9 +290,10 @@ impl Graph {
 
     /// Keep only the ids whose node has `label`.
     pub fn with_label(&self, ids: Vec<NodeId>, label: &str) -> Vec<NodeId> {
-        ids.into_iter()
-            .filter(|id| self.nodes.get(id).is_some_and(|n| n.labels.contains(label)))
-            .collect()
+        let Some(carrying) = self.by_label.get(label) else {
+            return Vec::new();
+        };
+        ids.into_iter().filter(|id| carrying.contains(id)).collect()
     }
 
     /// The Calc 3 query, generalised: nodes labelled `label` that share a
@@ -389,6 +434,52 @@ impl Graph {
         out
     }
 
+    /// Differences between two graphs, as readable lines (at most `limit`).
+    /// Empty means identical: same nodes with the same labels and props,
+    /// same edges with the same seqs, same envelope keys. Edge order is
+    /// ignored.
+    pub fn diff(&self, other: &Graph, limit: usize) -> Vec<String> {
+        let mut out = Vec::new();
+        for (id, n) in &self.nodes {
+            match other.nodes.get(id) {
+                None => out.push(format!("node {id} only on the left")),
+                Some(m) if m != n => out.push(format!("node {id} differs")),
+                _ => {}
+            }
+        }
+        for id in other
+            .nodes
+            .keys()
+            .filter(|id| !self.nodes.contains_key(*id))
+        {
+            out.push(format!("node {id} only on the right"));
+        }
+        let edges = |g: &Graph| -> BTreeSet<(String, String, String, u64)> {
+            g.edges
+                .iter()
+                .map(|e| (e.from.clone(), e.label.clone(), e.to.clone(), e.seq))
+                .collect()
+        };
+        let (a, b) = (edges(self), edges(other));
+        for e in a.difference(&b) {
+            out.push(format!(
+                "edge {} -{}-> {} (seq {}) only on the left",
+                e.0, e.1, e.2, e.3
+            ));
+        }
+        for e in b.difference(&a) {
+            out.push(format!(
+                "edge {} -{}-> {} (seq {}) only on the right",
+                e.0, e.1, e.2, e.3
+            ));
+        }
+        if self.envelope_keys() != other.envelope_keys() {
+            out.push("envelope keys differ".into());
+        }
+        out.truncate(limit);
+        out
+    }
+
     // ── Snapshot support ────────────────────────────────────────────────────
 
     /// Envelopes received with a key, and the node each one is. Sorted by
@@ -410,6 +501,9 @@ impl Graph {
         let mut g = Graph::default();
         for n in nodes {
             let id = n.id.clone();
+            for l in &n.labels {
+                g.by_label.entry(l.clone()).or_default().insert(id.clone());
+            }
             if g.nodes.insert(id.clone(), n).is_some() {
                 anyhow::bail!("snapshot holds node {id:?} twice");
             }
@@ -473,6 +567,92 @@ impl Graph {
         self.inc.entry(to.to_string()).or_default().push(i);
     }
 
+    fn add_label(&mut self, id: &str, label: &str) {
+        self.ensure(id).labels.insert(label.to_string());
+        self.by_label
+            .entry(label.to_string())
+            .or_default()
+            .insert(id.to_string());
+    }
+
+    /// Remove the edge (from, label, to) if present. O(degree of its ends).
+    fn remove_edge(&mut self, from: &str, label: &str, to: &str) {
+        if !self
+            .seen
+            .remove(&(from.to_string(), label.to_string(), to.to_string()))
+        {
+            return;
+        }
+        let i = self.out[from]
+            .iter()
+            .copied()
+            .find(|&i| self.edges[i].label == label && self.edges[i].to == to)
+            .expect("seen and out agree");
+        self.detach(i);
+    }
+
+    /// Take edge i out of the adjacency lists and the Vec. The last edge
+    /// moves into slot i, so its two list entries are renumbered.
+    fn detach(&mut self, i: usize) {
+        let e = &self.edges[i];
+        let (from, to) = (e.from.clone(), e.to.clone());
+        drop_index(self.out.get_mut(&from), i);
+        drop_index(self.inc.get_mut(&to), i);
+        let last = self.edges.len() - 1;
+        self.edges.swap_remove(i);
+        if i != last {
+            let moved = &self.edges[i];
+            renumber(self.out.get_mut(&moved.from), last, i);
+            renumber(self.inc.get_mut(&moved.to), last, i);
+        }
+    }
+
+    /// Remove a node and every edge touching it.
+    fn remove_node(&mut self, id: &str) {
+        let Some(node) = self.nodes.remove(id) else {
+            return;
+        };
+        // Each pass takes one edge off the node; indices shift underneath,
+        // so re-read the lists every time rather than holding them.
+        loop {
+            let next = self
+                .out
+                .get(id)
+                .and_then(|v| v.first())
+                .or_else(|| self.inc.get(id).and_then(|v| v.first()))
+                .copied();
+            let Some(i) = next else { break };
+            let e = &self.edges[i];
+            self.seen
+                .remove(&(e.from.clone(), e.label.clone(), e.to.clone()));
+            self.detach(i);
+        }
+        self.out.remove(id);
+        self.inc.remove(id);
+        for l in &node.labels {
+            if let Some(ids) = self.by_label.get_mut(l) {
+                ids.remove(id);
+                if ids.is_empty() {
+                    self.by_label.remove(l);
+                }
+            }
+        }
+        self.envelope_node.retain(|_, n| n != id);
+    }
+
+    /// Like `resolve`, but never creates a node (for removals).
+    fn resolve_existing(&self, target: &str) -> NodeId {
+        if let Some(id) = target
+            .strip_prefix("env:")
+            .and_then(|u| Uuid::parse_str(u).ok())
+        {
+            if let Some(node) = self.envelope_node.get(&id) {
+                return node.clone();
+            }
+        }
+        target.to_string()
+    }
+
     /// The node for an envelope: its key if it was received with one,
     /// otherwise env:<uuid>.
     fn envelope(&mut self, id: Uuid) -> NodeId {
@@ -526,6 +706,22 @@ pub fn mat_pow(a: &[Vec<u64>], k: u32) -> Vec<Vec<u64>> {
         result = mat_mul(&result, a);
     }
     result
+}
+
+fn drop_index(list: Option<&mut Vec<usize>>, i: usize) {
+    if let Some(v) = list {
+        if let Some(p) = v.iter().position(|&x| x == i) {
+            v.swap_remove(p);
+        }
+    }
+}
+
+fn renumber(list: Option<&mut Vec<usize>>, old: usize, new: usize) {
+    if let Some(v) = list {
+        if let Some(slot) = v.iter_mut().find(|x| **x == old) {
+            *slot = new;
+        }
+    }
 }
 
 fn other_end<'a>(e: &'a Edge, id: &str) -> &'a str {
@@ -634,6 +830,213 @@ mod tests {
             vec![vec![0; 4]; 4],
             "no walk of length 4 in a 4-node DAG path"
         );
+    }
+
+    fn unlinked(seq: u64, from: &str, label: &str, to: &str) -> Record {
+        let mut r = linked(seq, from, label, to);
+        r.event.kind = EventKind::Unlinked;
+        r
+    }
+
+    fn retracted(seq: u64, node: &str) -> Record {
+        let mut event = Event::new("n", "n", None, None, EventKind::Retracted, None);
+        event.node = Some(node.into());
+        Record {
+            v: 1,
+            seq,
+            device: "t".into(),
+            event,
+        }
+    }
+
+    fn edge_set(g: &Graph) -> BTreeSet<(String, String, String)> {
+        g.edges()
+            .iter()
+            .map(|e| (e.from.clone(), e.label.clone(), e.to.clone()))
+            .collect()
+    }
+
+    // a→b, a→c, b→c, then unlink a→b.
+    //   left: a→c, b→c.   out-degree a 1, b 1.   in-degree c 2, b 0.
+    // Linking a→b again brings it back, carrying the new record's seq.
+    #[test]
+    fn unlinking_removes_one_edge_and_relinking_restores_it() {
+        let mut g = Graph::from_records(&[
+            linked(1, "a", "R", "b"),
+            linked(2, "a", "R", "c"),
+            linked(3, "b", "R", "c"),
+            unlinked(4, "a", "R", "b"),
+        ]);
+        assert!(!g.has_edge("a", "R", "b"));
+        assert_eq!(g.edge_count(), 2);
+        let d: Vec<(usize, usize)> = g
+            .degrees()
+            .iter()
+            .map(|d| (d.out_degree, d.in_degree))
+            .collect();
+        assert_eq!(d, vec![(1, 0), (1, 0), (0, 2)], "a b c");
+        assert_eq!(g.hop(&ids(&["a"]), None, Direction::Out), ids(&["c"]));
+
+        g.apply(&linked(5, "a", "R", "b"));
+        assert!(g.has_edge("a", "R", "b"));
+        assert_eq!(
+            g.edges_of("a", Direction::Out, None)
+                .iter()
+                .find(|e| e.to == "b")
+                .unwrap()
+                .seq,
+            5
+        );
+
+        // Unlinking what isn't there changes nothing.
+        let before = edge_set(&g);
+        g.apply(&unlinked(6, "x", "R", "y"));
+        assert_eq!(edge_set(&g), before);
+    }
+
+    // Star z–p, z–q, z–r plus p→q. Retract z: only p→q is left; p, q, r
+    // stay as nodes. A new link to z makes a fresh, empty z.
+    #[test]
+    fn retracting_a_node_removes_it_and_every_edge_touching_it() {
+        let mut g = Graph::from_records(&[
+            linked(1, "z", "R", "p"),
+            linked(2, "q", "R", "z"),
+            linked(3, "z", "R", "r"),
+            linked(4, "p", "R", "q"),
+            linked(5, "z", "R", "z"),
+            retracted(6, "z"),
+        ]);
+        assert!(g.node("z").is_none());
+        assert_eq!(
+            edge_set(&g),
+            BTreeSet::from([("p".into(), "R".into(), "q".into())])
+        );
+        assert!(g.node("r").is_some(), "the other ends stay");
+        assert!(g.edges_of("r", Direction::Both, None).is_empty());
+
+        g.apply(&linked(7, "p", "R", "z"));
+        assert!(
+            g.node("z").unwrap().labels.is_empty(),
+            "back as a fresh, empty node"
+        );
+    }
+
+    #[test]
+    fn the_label_index_follows_receive_and_retract() {
+        let mut topic = Envelope::new(
+            Source::Manual,
+            "topic",
+            Payload::Text("t".into()),
+            None::<&str>,
+        );
+        topic.meta.insert("key".into(), "topic/trig".into());
+        let mut received = Event::new(
+            "intake",
+            "x",
+            None,
+            Some(topic.id),
+            EventKind::Received,
+            None,
+        );
+        received.envelope = Some(crate::event::EnvelopeFacts::of(&topic));
+        let rec = Record {
+            v: 1,
+            seq: 1,
+            device: "t".into(),
+            event: received,
+        };
+
+        let mut g = Graph::from_records(&[rec.clone()]);
+        assert_eq!(
+            g.nodes_with_label("topic")
+                .iter()
+                .map(|n| n.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["topic/trig"]
+        );
+        assert_eq!(
+            g.with_label(ids(&["topic/trig", "nope"]), "topic"),
+            ids(&["topic/trig"])
+        );
+
+        g.apply(&retracted(2, "topic/trig"));
+        assert!(g.nodes_with_label("topic").is_empty());
+        assert!(
+            !g.label_counts().contains_key("topic"),
+            "an empty label disappears from the index"
+        );
+
+        g.apply(&Record { seq: 3, ..rec });
+        assert_eq!(
+            g.nodes_with_label("topic").len(),
+            1,
+            "receiving it again puts it back"
+        );
+    }
+
+    // Removal renumbers edges (swap_remove), which is where bookkeeping
+    // bugs hide. 3,000 random link / unlink / retract operations over 10
+    // nodes, checked after every step against a model that is just a set
+    // of (from, label, to) and a set of retracted-and-not-recreated nodes:
+    // same edges, same degrees, and every adjacency entry points at an
+    // edge that really has that node at that end.
+    #[test]
+    fn random_link_unlink_retract_matches_a_naive_model() {
+        let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = |n: u64| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) % n
+        };
+        let node = |i: u64| format!("n{i}");
+        let labels = ["A", "B"];
+        let mut g = Graph::default();
+        let mut model: BTreeSet<(String, String, String)> = BTreeSet::new();
+
+        for seq in 1..=3000u64 {
+            let (a, b, l) = (
+                node(next(10)),
+                node(next(10)),
+                labels[next(2) as usize].to_string(),
+            );
+            match next(10) {
+                0..=5 => {
+                    g.apply(&linked(seq, &a, &l, &b));
+                    model.insert((a, l, b));
+                }
+                6..=8 => {
+                    g.apply(&unlinked(seq, &a, &l, &b));
+                    model.remove(&(a, l, b));
+                }
+                _ => {
+                    g.apply(&retracted(seq, &a));
+                    model.retain(|(f, _, t)| f != &a && t != &a);
+                }
+            }
+
+            assert_eq!(edge_set(&g), model, "after op {seq}");
+            for id in g.nodes.keys() {
+                let outs = model.iter().filter(|(f, _, _)| f == id).count();
+                let ins = model.iter().filter(|(_, _, t)| t == id).count();
+                assert_eq!(
+                    g.out.get(id).map_or(0, Vec::len),
+                    outs,
+                    "out-degree of {id} after op {seq}"
+                );
+                assert_eq!(
+                    g.inc.get(id).map_or(0, Vec::len),
+                    ins,
+                    "in-degree of {id} after op {seq}"
+                );
+                for &i in g.out.get(id).into_iter().flatten() {
+                    assert_eq!(&g.edges[i].from, id, "out entry {i} of {id} after op {seq}");
+                }
+                for &i in g.inc.get(id).into_iter().flatten() {
+                    assert_eq!(&g.edges[i].to, id, "in entry {i} of {id} after op {seq}");
+                }
+            }
+        }
     }
 
     #[test]

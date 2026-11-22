@@ -37,6 +37,12 @@ pub enum EventKind {
     Received,
     /// A Link hop recorded one edge. Carries `link`.
     Linked,
+    /// A correction: the edge in `link` is withdrawn. A later Linked with
+    /// the same (from, label, to) adds it again.
+    Unlinked,
+    /// A correction: the node in `node`, and every edge touching it, is
+    /// withdrawn. A later envelope or link naming it creates it afresh.
+    Retracted,
 }
 
 /// What the graph needs to know about an envelope to make it a node.
@@ -93,9 +99,12 @@ pub struct Event {
     /// Set on Received events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub envelope: Option<EnvelopeFacts>,
-    /// Set on Linked events.
+    /// Set on Linked and Unlinked events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<LinkFacts>,
+    /// Set on Retracted events: the node withdrawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
 }
 
 impl Event {
@@ -120,6 +129,7 @@ impl Event {
             envelope_parent: None,
             envelope: None,
             link: None,
+            node: None,
         }
     }
 
