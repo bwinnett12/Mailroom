@@ -1,4 +1,0 @@
-id = "60-A"
-name = "recipes"
-kind = "leaf"
-accepts = ["recipe", "ingredient"]
